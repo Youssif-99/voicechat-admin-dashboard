@@ -7,8 +7,12 @@
     "build": "next build",
     "start": "next start",
     "lint": "next lint",
+    "test": "tsx tests/integration.test.ts",
+    "test:watch": "tsx watch tests/integration.test.ts",
     "db:push": "prisma db push",
+    "db:generate": "prisma generate",
     "db:seed": "tsx prisma/seed.ts",
+    "db:seed-icons": "tsx prisma/seed-icons.ts",
     "db:studio": "prisma studio",
     "postinstall": "prisma generate"
   },
@@ -19,6 +23,7 @@
     "next": "14.2.15",
     "react": "^18.3.1",
     "react-dom": "^18.3.1",
+    "socket.io-client": "^4.8.3",
     "zod": "^3.23.8"
   },
   "devDependencies": {

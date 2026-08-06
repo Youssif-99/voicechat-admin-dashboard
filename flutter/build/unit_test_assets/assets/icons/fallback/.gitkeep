@@ -1,0 +1,11 @@
+# Place bundled fallback SVG icons here.
+# One file per icon key, with dots replaced by underscores.
+# Example: nav.home → nav_home.svg
+#
+# These files are the last line of defence when:
+#   1. Network is unavailable
+#   2. Disk cache has expired
+#   3. Admin has not uploaded a custom icon yet
+#
+# The app will NEVER crash due to a missing icon — it falls back to
+# Icons.image_not_supported_outlined as the absolute last resort.

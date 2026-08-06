@@ -82,11 +82,7 @@ export default function LoginPage() {
           <SubmitButton />
 
           <p className="text-xs text-text-muted text-center pt-2">
-            بيانات الدخول التجريبية بعد التهيئة:
-            <br />
-            <span dir="ltr" className="font-mono">
-              admin@example.com / admin123
-            </span>
+            يتم التحقق من بيانات الدخول عبر الخادم الرئيسي (Express Backend)
           </p>
         </form>
       </div>

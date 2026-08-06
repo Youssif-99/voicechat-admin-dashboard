@@ -1,4 +1,24 @@
-// قاعدة بيانات لوحة تحكم تطبيق غرف الدردشة الصوتية
+// ─────────────────────────────────────────────────────────────────────────────
+//  Next.js Admin Dashboard — Prisma Schema
+//
+//  IMPORTANT: This schema is ONLY for the Dynamic Icon Management System.
+//
+//  The following models have been REMOVED because they are owned exclusively
+//  by the Express backend and must never be duplicated:
+//    ✗ Admin    → authenticate via Express /api/admin/auth/login
+//    ✗ Agency   → managed via Express /api/admin/agencies
+//    ✗ User     → managed via Express /api/admin/users
+//    ✗ Room     → managed via Express /api/admin/rooms
+//    ✗ Payment  → managed via Express /api/admin/payments
+//
+//  The dashboard communicates with all of the above through the REST API
+//  client at src/lib/api-client.ts — NEVER via direct Prisma calls.
+//
+//  The ONLY reason this database connection exists is to serve the Icon
+//  catalog to Flutter clients via GET /api/icons (ETag-based, public).
+//  Icon metadata is stored here so it can be served independently of the
+//  Express backend, giving Flutter a single, stable CDN-like endpoint.
+// ─────────────────────────────────────────────────────────────────────────────
 
 generator client {
   provider = "prisma-client-js"
@@ -9,74 +29,193 @@ datasource db {
   url      = env("DATABASE_URL")
 }
 
-model Admin {
-  id           String   @id @default(cuid())
-  name         String
-  email        String   @unique
-  passwordHash String
-  role         String   @default("ADMIN")
-  createdAt    DateTime @default(now())
+// ─────────────────────────────────────────────────────────────────────────────
+//  Dynamic Icon Management System
+// ─────────────────────────────────────────────────────────────────────────────
+
+/// The currently active version of an icon key used by the Flutter app.
+model Icon {
+  id          String    @id @default(cuid())
+  /// Unique key used in Flutter app — e.g. "nav.home", "gift.rose"
+  key         String    @unique
+  displayName String
+  /// Category group — e.g. "bottom_nav", "gifts", "badges"
+  category    String
+  /// Preferred file type: "svg" | "png" | "both"
+  type        String    @default("svg")
+  svgUrl      String?
+  pngUrl      String?
+  /// MD5 hash of the file — used for ETag / version comparison
+  svgHash     String?
+  pngHash     String?
+  enabled     Boolean   @default(true)
+  /// Monotonically increasing version — bumped on every mutation
+  version     Int       @default(1)
+  createdAt   DateTime  @default(now())
+  updatedAt   DateTime  @updatedAt
+  /// Admin ID from Express who last modified this icon
+  updatedBy   String?
+  /// Soft-delete — keeps audit trail intact
+  deletedAt   DateTime?
+
+  versions  IconVersion[]
+  auditLogs IconAuditLog[]
+
+  @@index([category])
+  @@index([enabled])
+  @@index([deletedAt])
 }
 
-model Agency {
-  id              String   @id @default(cuid())
-  name            String
-  ownerName       String
-  phone           String
-  email           String?
-  status          String   @default("PENDING")
-  level           String   @default("عادي")
-  commissionRate  Float    @default(0.30)
-  totalEarnings   Float    @default(0)
-  notes           String?
-  createdAt       DateTime @default(now())
-  reviewedAt      DateTime?
-  hosts           User[]
-}
-
-model User {
+/// Full history of every previous icon version — used for Rollback
+model IconVersion {
   id            String   @id @default(cuid())
-  username      String   @unique
-  displayName   String
-  avatarUrl     String?
-  phone         String?
-  email         String?
-  deviceId      String?
-  coins         Int      @default(0)
-  vipLevel      Int      @default(0)
-  isAgent       Boolean  @default(false)
-  isHost        Boolean  @default(false)
-  status        String   @default("ACTIVE")
-  banType       String?
-  banReason     String?
-  banExpiresAt  DateTime?
+  iconId        String
+  icon          Icon     @relation(fields: [iconId], references: [id], onDelete: Cascade)
+  version       Int
+  svgUrl        String?
+  pngUrl        String?
+  svgHash       String?
+  pngHash       String?
+  type          String   @default("svg")
+  updatedBy     String?
+  updatedByName String?
   createdAt     DateTime @default(now())
-  agencyId      String?
-  agency        Agency?  @relation(fields: [agencyId], references: [id])
-  rooms         Room[]   @relation("RoomOwner")
-  payments      Payment[]
+  changeNote    String?
+
+  @@index([iconId])
+  @@index([version])
 }
 
-model Room {
+/// Full audit trail for every icon operation
+model IconAuditLog {
   id          String   @id @default(cuid())
-  name        String
-  coverUrl    String?
-  seatsLimit  Int      @default(20)
-  type        String   @default("PUBLIC")
-  status      String   @default("ACTIVE")
+  iconId      String?
+  icon        Icon?    @relation(fields: [iconId], references: [id], onDelete: SetNull)
+  /// "CREATE" | "UPDATE" | "DELETE" | "RESTORE" | "ENABLE" | "DISABLE" | "ROLLBACK" | "BULK_UPLOAD" | "CACHE_CLEAR"
+  action      String
+  adminId     String
+  adminName   String
+  adminEmail  String
+  /// Additional JSON: before/after values, file counts in bulk ops, etc.
+  metadata    String?
+  ipAddress   String?
+  userAgent   String?
   createdAt   DateTime @default(now())
-  ownerId     String
-  owner       User     @relation("RoomOwner", fields: [ownerId], references: [id])
+
+  @@index([iconId])
+  @@index([adminId])
+  @@index([action])
+  @@index([createdAt])
 }
 
-model Payment {
-  id          String   @id @default(cuid())
-  type        String
-  amount      Float
-  currency    String   @default("USD")
-  status      String   @default("SUCCESS")
-  description String?
-  createdAt   DateTime @default(now())
-  userId      String
-  user        User     @relation(fields: [userId], references: [id])
+/// Catalog version singleton — ETag for Flutter's conditional GET requests
+model IconCatalogVersion {
+  id        String   @id @default("singleton")
+  version   Int      @default(1)
+  etag      String
+  updatedAt DateTime @updatedAt
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+//  App Asset Management System
+//
+//  Manages all remotely-configurable application assets:
+//  nav icons, branding assets (logo, splash, auth), notification icon,
+//  gift icon, VIP/SVIP icons, agency icon, wallet icon, etc.
+//
+//  Key format: snake_case — e.g. home_icon, app_logo, splash_logo
+//  This is the single source of truth for Flutter's AssetService.
+// ─────────────────────────────────────────────────────────────────────────────
+
+/// A remotely-managed application asset (icon, logo, branding image).
+model AppAsset {
+  id           String    @id @default(cuid())
+  /// Unique identifier consumed by Flutter — e.g. "home_icon", "app_logo"
+  key          String    @unique
+  /// Human-readable display name for the admin dashboard
+  name         String
+  /// Category group — e.g. "navigation", "branding", "social", "economy"
+  category     String
+  /// Full-resolution image URL (CDN / local)
+  imageUrl     String?
+  /// Thumbnail URL (optimized, ≤ 128×128)
+  thumbnailUrl String?
+  /// MIME type of the uploaded file — "image/svg+xml" | "image/png" | "image/webp" | "image/jpeg"
+  mimeType     String?
+  /// MD5 hash of the file — used for ETag / cache invalidation
+  hash         String?
+  /// File size in bytes
+  sizeBytes    Int?
+  /// Width in pixels (0 for SVG)
+  width        Int?
+  /// Height in pixels (0 for SVG)
+  height       Int?
+  /// Monotonically increasing — bumped on every successful upload/replace
+  version      Int       @default(1)
+  /// Whether this asset is served to Flutter clients
+  isActive     Boolean   @default(true)
+  /// Admin ID (from Express) who last modified this asset
+  updatedBy    String?
+  /// Soft-delete — preserves audit trail
+  deletedAt    DateTime?
+  createdAt    DateTime  @default(now())
+  updatedAt    DateTime  @updatedAt
+
+  versions  AppAssetVersion[]
+  auditLogs AppAssetAuditLog[]
+
+  @@index([category])
+  @@index([isActive])
+  @@index([deletedAt])
+  @@index([key])
+}
+
+/// Full history of every previous asset upload — used for Rollback / Version History
+model AppAssetVersion {
+  id           String   @id @default(cuid())
+  assetId      String
+  asset        AppAsset @relation(fields: [assetId], references: [id], onDelete: Cascade)
+  version      Int
+  imageUrl     String?
+  thumbnailUrl String?
+  mimeType     String?
+  hash         String?
+  sizeBytes    Int?
+  updatedBy    String?
+  updatedByName String?
+  changeNote   String?
+  createdAt    DateTime @default(now())
+
+  @@index([assetId])
+  @@index([version])
+}
+
+/// Full audit trail for every asset operation
+model AppAssetAuditLog {
+  id          String    @id @default(cuid())
+  assetId     String?
+  asset       AppAsset? @relation(fields: [assetId], references: [id], onDelete: SetNull)
+  /// "CREATE" | "UPDATE" | "DELETE" | "RESTORE" | "ENABLE" | "DISABLE" | "ROLLBACK" | "SEED"
+  action      String
+  adminId     String
+  adminName   String
+  adminEmail  String
+  /// JSON: before/after values, file info, etc.
+  metadata    String?
+  ipAddress   String?
+  userAgent   String?
+  createdAt   DateTime  @default(now())
+
+  @@index([assetId])
+  @@index([adminId])
+  @@index([action])
+  @@index([createdAt])
+}
+
+/// Catalog version singleton for AppAsset — ETag for Flutter's conditional GET
+model AppAssetCatalogVersion {
+  id        String   @id @default("singleton")
+  version   Int      @default(1)
+  etag      String
+  updatedAt DateTime @updatedAt
 }

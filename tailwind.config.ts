@@ -23,6 +23,7 @@ const config: Config = {
         success: "#34D399",
         danger: "#F0654B",
         info: "#5B9BE8",
+        warning: "#F0A84B",
       },
       fontFamily: {
         display: ["var(--font-almarai)", "sans-serif"],

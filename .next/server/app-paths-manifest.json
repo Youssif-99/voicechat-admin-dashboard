@@ -2,10 +2,21 @@
   "/_not-found/page": "app/_not-found/page.js",
   "/login/page": "app/login/page.js",
   "/page": "app/page.js",
+  "/api/admin/icons/[id]/disable/route": "app/api/admin/icons/[id]/disable/route.js",
+  "/api/admin/icons/[id]/enable/route": "app/api/admin/icons/[id]/enable/route.js",
+  "/api/admin/icons/[id]/route": "app/api/admin/icons/[id]/route.js",
+  "/api/admin/icons/[id]/restore/route": "app/api/admin/icons/[id]/restore/route.js",
+  "/api/admin/icons/bulk/route": "app/api/admin/icons/bulk/route.js",
+  "/api/admin/icons/cache-invalidate/route": "app/api/admin/icons/cache-invalidate/route.js",
+  "/api/admin/icons/rollback/route": "app/api/admin/icons/rollback/route.js",
+  "/api/icons/route": "app/api/icons/route.js",
+  "/api/admin/icons/audit/route": "app/api/admin/icons/audit/route.js",
+  "/api/admin/icons/route": "app/api/admin/icons/route.js",
   "/(dashboard)/admins/page": "app/(dashboard)/admins/page.js",
   "/(dashboard)/agencies/page": "app/(dashboard)/agencies/page.js",
   "/(dashboard)/dashboard/page": "app/(dashboard)/dashboard/page.js",
   "/(dashboard)/payments/page": "app/(dashboard)/payments/page.js",
   "/(dashboard)/rooms/page": "app/(dashboard)/rooms/page.js",
-  "/(dashboard)/users/page": "app/(dashboard)/users/page.js"
+  "/(dashboard)/users/page": "app/(dashboard)/users/page.js",
+  "/(dashboard)/icons/page": "app/(dashboard)/icons/page.js"
 }

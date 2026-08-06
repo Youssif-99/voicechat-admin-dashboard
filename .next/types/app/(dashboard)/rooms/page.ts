@@ -1,4 +1,4 @@
-// File: C:\Users\Toshiba\Downloads\voice-admin-dashboard\src\app\(dashboard)\rooms\page.tsx
+// File: E:\voice-admin-dashboard\src\app\(dashboard)\rooms\page.tsx
 import * as entry from '../../../../../src/app/(dashboard)/rooms/page.js'
 import type { ResolvingMetadata, ResolvingViewport } from 'next/dist/lib/metadata/types/metadata-interface.js'
 

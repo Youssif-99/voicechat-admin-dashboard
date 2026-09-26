@@ -1,221 +1,1364 @@
-// ─────────────────────────────────────────────────────────────────────────────
-//  Next.js Admin Dashboard — Prisma Schema
-//
-//  IMPORTANT: This schema is ONLY for the Dynamic Icon Management System.
-//
-//  The following models have been REMOVED because they are owned exclusively
-//  by the Express backend and must never be duplicated:
-//    ✗ Admin    → authenticate via Express /api/admin/auth/login
-//    ✗ Agency   → managed via Express /api/admin/agencies
-//    ✗ User     → managed via Express /api/admin/users
-//    ✗ Room     → managed via Express /api/admin/rooms
-//    ✗ Payment  → managed via Express /api/admin/payments
-//
-//  The dashboard communicates with all of the above through the REST API
-//  client at src/lib/api-client.ts — NEVER via direct Prisma calls.
-//
-//  The ONLY reason this database connection exists is to serve the Icon
-//  catalog to Flutter clients via GET /api/icons (ETag-based, public).
-//  Icon metadata is stored here so it can be served independently of the
-//  Express backend, giving Flutter a single, stable CDN-like endpoint.
-// ─────────────────────────────────────────────────────────────────────────────
-
 generator client {
   provider = "prisma-client-js"
 }
 
 datasource db {
-  provider = "postgresql"
-  url      = env("DATABASE_URL")
+  provider  = "postgresql"
+  url       = env("DATABASE_URL")
+  directUrl = env("DIRECT_URL")
 }
 
-// ─────────────────────────────────────────────────────────────────────────────
-//  Dynamic Icon Management System
-// ─────────────────────────────────────────────────────────────────────────────
-
-/// The currently active version of an icon key used by the Flutter app.
-model Icon {
-  id          String    @id @default(cuid())
-  /// Unique key used in Flutter app — e.g. "nav.home", "gift.rose"
-  key         String    @unique
-  displayName String
-  /// Category group — e.g. "bottom_nav", "gifts", "badges"
-  category    String
-  /// Preferred file type: "svg" | "png" | "both"
-  type        String    @default("svg")
-  svgUrl      String?
-  pngUrl      String?
-  /// MD5 hash of the file — used for ETag / version comparison
-  svgHash     String?
-  pngHash     String?
-  enabled     Boolean   @default(true)
-  /// Monotonically increasing version — bumped on every mutation
-  version     Int       @default(1)
-  createdAt   DateTime  @default(now())
-  updatedAt   DateTime  @updatedAt
-  /// Admin ID from Express who last modified this icon
-  updatedBy   String?
-  /// Soft-delete — keeps audit trail intact
-  deletedAt   DateTime?
-
-  versions  IconVersion[]
-  auditLogs IconAuditLog[]
-
-  @@index([category])
-  @@index([enabled])
-  @@index([deletedAt])
+model AgentCommission {
+  id             String           @id
+  agentId        String
+  referredUserId String
+  sourceType     CommissionSource
+  sourceId       String
+  baseCoins      Int
+  rate           Float
+  earnedCoins    Int
+  createdAt      DateTime         @default(now())
+  AgentProfile   AgentProfile     @relation(fields: [agentId], references: [id])
+  User           User             @relation(fields: [referredUserId], references: [id])
 }
 
-/// Full history of every previous icon version — used for Rollback
-model IconVersion {
-  id            String   @id @default(cuid())
-  iconId        String
-  icon          Icon     @relation(fields: [iconId], references: [id], onDelete: Cascade)
-  version       Int
-  svgUrl        String?
-  pngUrl        String?
-  svgHash       String?
-  pngHash       String?
-  type          String   @default("svg")
-  updatedBy     String?
-  updatedByName String?
-  createdAt     DateTime @default(now())
-  changeNote    String?
-
-  @@index([iconId])
-  @@index([version])
+model AgentProfile {
+  id              String            @id
+  userId          String            @unique
+  agentCode       String            @unique
+  status          AgentStatus       @default(ACTIVE)
+  tier            AgentTier         @default(BRONZE)
+  totalReferred   Int               @default(0)
+  activeReferred  Int               @default(0)
+  totalEarned     Int               @default(0)
+  monthlyEarned   Int               @default(0)
+  rating          Float             @default(0)
+  joinedAt        DateTime          @default(now())
+  updatedAt       DateTime
+  AgentCommission AgentCommission[]
+  User            User              @relation(fields: [userId], references: [id])
+  Referral        Referral[]
 }
 
-/// Full audit trail for every icon operation
-model IconAuditLog {
-  id          String   @id @default(cuid())
-  iconId      String?
-  icon        Icon?    @relation(fields: [iconId], references: [id], onDelete: SetNull)
-  /// "CREATE" | "UPDATE" | "DELETE" | "RESTORE" | "ENABLE" | "DISABLE" | "ROLLBACK" | "BULK_UPLOAD" | "CACHE_CLEAR"
-  action      String
-  adminId     String
-  adminName   String
-  adminEmail  String
-  /// Additional JSON: before/after values, file counts in bulk ops, etc.
-  metadata    String?
-  ipAddress   String?
-  userAgent   String?
-  createdAt   DateTime @default(now())
-
-  @@index([iconId])
-  @@index([adminId])
-  @@index([action])
-  @@index([createdAt])
+model DeviceToken {
+  id        String   @id
+  userId    String
+  token     String   @unique
+  platform  String
+  isActive  Boolean  @default(true)
+  createdAt DateTime @default(now())
+  updatedAt DateTime
+  User      User     @relation(fields: [userId], references: [id])
 }
 
-/// Catalog version singleton — ETag for Flutter's conditional GET requests
-model IconCatalogVersion {
-  id        String   @id @default("singleton")
-  version   Int      @default(1)
-  etag      String
-  updatedAt DateTime @updatedAt
-}
-
-// ─────────────────────────────────────────────────────────────────────────────
-//  App Asset Management System
-//
-//  Manages all remotely-configurable application assets:
-//  nav icons, branding assets (logo, splash, auth), notification icon,
-//  gift icon, VIP/SVIP icons, agency icon, wallet icon, etc.
-//
-//  Key format: snake_case — e.g. home_icon, app_logo, splash_logo
-//  This is the single source of truth for Flutter's AssetService.
-// ─────────────────────────────────────────────────────────────────────────────
-
-/// A remotely-managed application asset (icon, logo, branding image).
-model AppAsset {
-  id           String    @id @default(cuid())
-  /// Unique identifier consumed by Flutter — e.g. "home_icon", "app_logo"
-  key          String    @unique
-  /// Human-readable display name for the admin dashboard
+model Entrance {
+  id           String         @id
   name         String
-  /// Category group — e.g. "navigation", "branding", "social", "economy"
-  category     String
-  /// Full-resolution image URL (CDN / local)
-  imageUrl     String?
-  /// Thumbnail URL (optimized, ≤ 128×128)
-  thumbnailUrl String?
-  /// MIME type of the uploaded file — "image/svg+xml" | "image/png" | "image/webp" | "image/jpeg"
-  mimeType     String?
-  /// MD5 hash of the file — used for ETag / cache invalidation
-  hash         String?
-  /// File size in bytes
-  sizeBytes    Int?
-  /// Width in pixels (0 for SVG)
-  width        Int?
-  /// Height in pixels (0 for SVG)
-  height       Int?
-  /// Monotonically increasing — bumped on every successful upload/replace
-  version      Int       @default(1)
-  /// Whether this asset is served to Flutter clients
-  isActive     Boolean   @default(true)
-  /// Admin ID (from Express) who last modified this asset
-  updatedBy    String?
-  /// Soft-delete — preserves audit trail
-  deletedAt    DateTime?
-  createdAt    DateTime  @default(now())
-  updatedAt    DateTime  @updatedAt
+  nameAr       String
+  animationUrl String
+  previewUrl   String
+  tier         VipTier
+  coinPrice    Int            @default(0)
+  isActive     Boolean        @default(true)
+  createdAt    DateTime       @default(now())
+  UserEntrance UserEntrance[]
+}
 
-  versions  AppAssetVersion[]
-  auditLogs AppAssetAuditLog[]
+model Follow {
+  id                            String   @id
+  followerId                    String
+  followingId                   String
+  createdAt                     DateTime @default(now())
+  User_Follow_followerIdToUser  User     @relation("Follow_followerIdToUser", fields: [followerId], references: [id])
+  User_Follow_followingIdToUser User     @relation("Follow_followingIdToUser", fields: [followingId], references: [id])
+
+  @@unique([followerId, followingId])
+}
+
+model Frame {
+  id         String      @id
+  name       String
+  nameAr     String
+  imageUrl   String
+  previewUrl String
+  tier       VipTier
+  coinPrice  Int         @default(0)
+  isActive   Boolean     @default(true)
+  createdAt  DateTime    @default(now())
+  UserFrame  UserFrame[]
+}
+
+model Notification {
+  id        String           @id
+  userId    String
+  type      NotificationType
+  titleAr   String
+  bodyAr    String
+  data      Json?
+  isRead    Boolean          @default(false)
+  createdAt DateTime         @default(now())
+  User      User             @relation(fields: [userId], references: [id])
+}
+
+model Referral {
+  id             String         @id
+  agentId        String
+  referredUserId String         @unique
+  status         ReferralStatus @default(PENDING)
+  joinedAt       DateTime       @default(now())
+  activatedAt    DateTime?
+  AgentProfile   AgentProfile   @relation(fields: [agentId], references: [id])
+  User           User           @relation(fields: [referredUserId], references: [id])
+}
+
+model RoomRecording {
+  id           String          @id
+  roomId       String
+  recorderId   String
+  cloudinaryId String          @unique
+  audioUrl     String
+  durationSecs Int
+  sizeBytes    Int
+  status       RecordingStatus @default(PROCESSING)
+  sharedAt     DateTime?
+  createdAt    DateTime        @default(now())
+  User         User            @relation(fields: [recorderId], references: [id], onDelete: Cascade)
+  rooms        rooms           @relation(fields: [roomId], references: [id], onDelete: Cascade)
+
+  @@index([recorderId])
+  @@index([roomId])
+}
+
+model User {
+  id                                                   String                  @id
+  username                                             String                  @unique
+  email                                                String?                 @unique
+  phone                                                String?                 @unique
+  passwordHash                                         String?
+  avatar                                               String?
+  role                                                 Role                    @default(USER)
+  svipLevel                                            Int?
+  agentCode                                            String?                 @unique
+  isBanned                                             Boolean                 @default(false)
+  banExpiresAt                                         DateTime?
+  banType                                              BanType?
+  createdAt                                            DateTime                @default(now())
+  updatedAt                                            DateTime
+  tierGraceActive                                      Boolean                 @default(false)
+  tierGraceUntil                                       DateTime?
+  status                                               AccountStatus           @default(ACTIVE)
+  agencyName                                           String?
+  bio                                                  String?
+  birthday                                             DateTime?
+  countryCode                                          String?
+  displayName                                          String?
+  gender                                               String?
+  interests                                            Json?
+  offeredServices                                      Json?
+  teamSize                                             String?
+  accountType                                          AccountType             @default(USER)
+  agencyApproved                                       Boolean                 @default(false)
+  agencyApprovedAt                                     DateTime?
+  agencyApprovedBy                                     String?
+  profileCompleted                                     Boolean                 @default(false)
+  settings                                             Json?
+  AgentCommission                                      AgentCommission[]
+  AgentProfile                                         AgentProfile?
+  DeviceToken                                          DeviceToken[]
+  Follow_Follow_followerIdToUser                       Follow[]                @relation("Follow_followerIdToUser")
+  Follow_Follow_followingIdToUser                      Follow[]                @relation("Follow_followingIdToUser")
+  Notification                                         Notification[]
+  Referral                                             Referral?
+  RoomRecording                                        RoomRecording[]
+  User                                                 User?                   @relation("UserToUser", fields: [agencyApprovedBy], references: [id])
+  other_User                                           User[]                  @relation("UserToUser")
+  UserEntrance                                         UserEntrance[]
+  UserFrame                                            UserFrame[]
+  UserVip                                              UserVip?
+  VipTransaction                                       VipTransaction[]
+  agency_requests_agency_requests_reviewedByToUser     agency_requests[]       @relation("agency_requests_reviewedByToUser")
+  agency_requests_agency_requests_userIdToUser         agency_requests?        @relation("agency_requests_userIdToUser")
+  audit_logs                                           audit_logs[]
+  blocked_users_blocked_users_blockedIdToUser          blocked_users[]         @relation("blocked_users_blockedIdToUser")
+  blocked_users_blocked_users_blockerIdToUser          blocked_users[]         @relation("blocked_users_blockerIdToUser")
+  chat_messages                                        chat_messages[]
+  coin_transactions                                    coin_transactions[]
+  conversation_members                                 conversation_members[]
+  gift_transactions_gift_transactions_receiverIdToUser gift_transactions[]     @relation("gift_transactions_receiverIdToUser")
+  gift_transactions_gift_transactions_senderIdToUser   gift_transactions[]     @relation("gift_transactions_senderIdToUser")
+  message_reactions                                    message_reactions[]
+  message_reads                                        message_reads[]
+  otp_codes                                            otp_codes[]
+  password_reset_tokens                                password_reset_tokens[]
+  payment_orders                                       payment_orders[]
+  post_bookmarks                                       post_bookmarks[]
+  post_comments                                        post_comments[]
+  post_likes                                           post_likes[]
+  post_reports                                         post_reports[]
+  post_views                                           post_views[]
+  posts                                                posts[]
+  refresh_tokens                                       refresh_tokens[]
+  reports_reports_reportedUserIdToUser                 reports[]               @relation("reports_reportedUserIdToUser")
+  reports_reports_reporterIdToUser                     reports[]               @relation("reports_reporterIdToUser")
+  reports_reports_reviewedByIdToUser                   reports[]               @relation("reports_reviewedByIdToUser")
+  room_likes                                           room_likes[]
+  room_messages                                        room_messages[]
+  room_participants                                    room_participants[]
+  rooms                                                rooms[]
+  seat_requests                                        seat_requests[]
+  seats                                                seats[]
+  social_accounts                                      social_accounts[]
+  user_level_events                                    user_level_events[]
+  user_wallets                                         user_wallets?
+  user_warnings                                        user_warnings[]
+  vip_spend_ledger                                     vip_spend_ledger[]
+  withdrawal_requests                                  withdrawal_requests[]
+
+  @@index([displayName])
+  @@index([isBanned, status])
+  @@index([username, displayName])
+  @@index([username])
+}
+
+model UserEntrance {
+  id          String   @id
+  userId      String
+  entranceId  String
+  isActive    Boolean  @default(false)
+  purchasedAt DateTime @default(now())
+  Entrance    Entrance @relation(fields: [entranceId], references: [id])
+  User        User     @relation(fields: [userId], references: [id])
+
+  @@unique([userId, entranceId])
+}
+
+model UserFrame {
+  id          String   @id
+  userId      String
+  frameId     String
+  isActive    Boolean  @default(false)
+  purchasedAt DateTime @default(now())
+  Frame       Frame    @relation(fields: [frameId], references: [id])
+  User        User     @relation(fields: [userId], references: [id])
+
+  @@unique([userId, frameId])
+}
+
+model UserVip {
+  id                 String             @id
+  userId             String             @unique
+  tier               VipTier            @default(NONE)
+  startedAt          DateTime           @default(now())
+  expiresAt          DateTime?
+  autoRenew          Boolean            @default(false)
+  renewSource        String?
+  updatedAt          DateTime
+  status             SubscriptionStatus @default(NONE)
+  subscriptionType   String?
+  paymentProvider    String?
+  transactionId      String?
+  purchaseStatus     String?
+  isTestSubscription Boolean            @default(false)
+  ghostMode          Boolean            @default(false)
+  invisibleMode      Boolean            @default(false)
+  User               User               @relation(fields: [userId], references: [id])
+}
+
+model VipPlan {
+  id                    String   @id
+  tier                  VipTier  @unique
+  nameAr                String
+  priceCoins            Int
+  priceEGP              Float
+  maxRooms              Int
+  seatPriority          Boolean
+  frameId               String?
+  entranceId            String?
+  earningBonus          Float
+  canRecord             Boolean  @default(false)
+  canGoPrivate          Boolean  @default(false)
+  badgeColor            String
+  glowColor             String
+  features              String[]
+  isActive              Boolean  @default(true)
+  createdAt             DateTime @default(now())
+  storeProductIdAndroid String?
+  storeProductIdIos     String?
+  durationDays          Int      @default(30)
+}
+
+model VipTransaction {
+  id           String   @id
+  userId       String
+  fromTier     VipTier
+  toTier       VipTier
+  coinsSpent   Int?
+  egpSpent     Float?
+  durationDays Int      @default(30)
+  createdAt    DateTime @default(now())
+  User         User     @relation(fields: [userId], references: [id])
+}
+
+model admin_accounts {
+  id                   String                 @id
+  email                String                 @unique
+  passwordHash         String
+  name                 String
+  role                 AdminRole              @default(ADMIN)
+  isActive             Boolean                @default(true)
+  lastLoginAt          DateTime?
+  createdAt            DateTime               @default(now())
+  updatedAt            DateTime
+  deletedAt            DateTime?
+  admin_audit_logs     admin_audit_logs[]
+  admin_refresh_tokens admin_refresh_tokens[]
+
+  @@index([email])
+  @@index([role])
+}
+
+model admin_audit_logs {
+  id             String         @id
+  adminId        String
+  action         String
+  resource       String?
+  resourceId     String?
+  ipAddress      String?
+  userAgent      String?
+  metadata       Json?
+  createdAt      DateTime       @default(now())
+  admin_accounts admin_accounts @relation(fields: [adminId], references: [id], onDelete: Cascade)
+
+  @@index([action, createdAt])
+  @@index([adminId, createdAt])
+  @@index([resource, resourceId])
+}
+
+model admin_refresh_tokens {
+  id             String         @id
+  token          String         @unique
+  adminId        String
+  expiresAt      DateTime
+  createdAt      DateTime       @default(now())
+  admin_accounts admin_accounts @relation(fields: [adminId], references: [id], onDelete: Cascade)
+
+  @@index([adminId])
+  @@index([expiresAt])
+}
+
+model agency_requests {
+  id                                    String              @id
+  userId                                String              @unique
+  agencyName                            String
+  ownerName                             String
+  phone                                 String
+  email                                 String?
+  country                               String?
+  documents                             Json?
+  profileImage                          String?
+  bio                                   String?
+  teamSize                              String?
+  offeredServices                       Json?
+  status                                AgencyRequestStatus @default(PENDING)
+  rejectionReason                       String?
+  reviewedBy                            String?
+  reviewedAt                            DateTime?
+  createdAt                             DateTime            @default(now())
+  updatedAt                             DateTime
+  User_agency_requests_reviewedByToUser User?               @relation("agency_requests_reviewedByToUser", fields: [reviewedBy], references: [id])
+  User_agency_requests_userIdToUser     User                @relation("agency_requests_userIdToUser", fields: [userId], references: [id], onDelete: Cascade)
+
+  @@index([createdAt])
+  @@index([status])
+  @@index([userId])
+}
+
+model app_icons {
+  id              String            @id
+  key             String            @unique
+  category        IconCategory
+  displayName     String
+  url             String
+  storagePath     String
+  mimeType        String            @default("image/png")
+  width           Int?
+  height          Int?
+  size            Int?
+  version         Int               @default(1)
+  isActive        Boolean           @default(true)
+  isPublished     Boolean           @default(false)
+  isPending       Boolean           @default(false)
+  etag            String?
+  defaultUrl      String
+  createdById     String?
+  updatedById     String?
+  publishedAt     DateTime?
+  createdAt       DateTime          @default(now())
+  updatedAt       DateTime
+  icon_audit_logs icon_audit_logs[]
+  icon_versions   icon_versions[]
 
   @@index([category])
   @@index([isActive])
-  @@index([deletedAt])
   @@index([key])
 }
 
-/// Full history of every previous asset upload — used for Rollback / Version History
-model AppAssetVersion {
-  id           String   @id @default(cuid())
-  assetId      String
-  asset        AppAsset @relation(fields: [assetId], references: [id], onDelete: Cascade)
+model app_settings {
+  key       String   @id
+  value     Json
+  updatedAt DateTime
+}
+
+model audit_logs {
+  id        String      @id
+  userId    String?
+  action    AuditAction
+  ipAddress String?
+  userAgent String?
+  metadata  Json?
+  createdAt DateTime    @default(now())
+  User      User?       @relation(fields: [userId], references: [id])
+
+  @@index([action, createdAt])
+  @@index([userId, createdAt])
+  @@index([userId])
+}
+
+model banned_words {
+  id        String         @id
+  word      String         @unique
+  severity  BannedSeverity @default(MILD)
+  createdAt DateTime       @default(now())
+}
+
+model banners {
+  id        String    @id
+  title     String
+  imageUrl  String
+  linkUrl   String?
+  screen    String?
+  position  Int       @default(0)
+  enabled   Boolean   @default(true)
+  startAt   DateTime?
+  endAt     DateTime?
+  createdAt DateTime  @default(now())
+  updatedAt DateTime
+
+  @@index([enabled, position])
+}
+
+model blocked_users {
+  id                                 String   @id
+  blockerId                          String
+  blockedId                          String
+  createdAt                          DateTime @default(now())
+  User_blocked_users_blockedIdToUser User     @relation("blocked_users_blockedIdToUser", fields: [blockedId], references: [id], onDelete: Cascade)
+  User_blocked_users_blockerIdToUser User     @relation("blocked_users_blockerIdToUser", fields: [blockerId], references: [id], onDelete: Cascade)
+
+  @@unique([blockerId, blockedId])
+  @@index([blockerId])
+}
+
+model chat_messages {
+  id                  String                @id
+  conversationId      String
+  senderId            String
+  replyToId           String?
+  text                String?
+  type                MessageType           @default(TEXT)
+  status              MessageStatus         @default(SENDING)
+  isDeleted           Boolean               @default(false)
+  deletedAt           DateTime?
+  createdAt           DateTime              @default(now())
+  updatedAt           DateTime
+  conversations       conversations         @relation(fields: [conversationId], references: [id], onDelete: Cascade)
+  chat_messages       chat_messages?        @relation("chat_messagesTochat_messages", fields: [replyToId], references: [id])
+  other_chat_messages chat_messages[]       @relation("chat_messagesTochat_messages")
+  User                User                  @relation(fields: [senderId], references: [id], onDelete: Cascade)
+  message_attachments message_attachments[]
+  message_reactions   message_reactions[]
+  message_reads       message_reads[]
+
+  @@index([conversationId])
+  @@index([createdAt])
+  @@index([senderId])
+}
+
+model coin_packages {
+  id                    String   @id
+  name                  String
+  coins                 Int
+  priceUSD              Float
+  priceEGP              Float
+  bonusCoins            Int      @default(0)
+  isActive              Boolean  @default(true)
+  createdAt             DateTime @default(now())
+  storeProductIdAndroid String?
+  storeProductIdIos     String?
+}
+
+model coin_transactions {
+  id           String     @id
+  userId       String
+  type         CoinTxType
+  amount       Int
+  balanceAfter Int
+  referenceId  String?
+  description  String?
+  createdAt    DateTime   @default(now())
+  User         User       @relation(fields: [userId], references: [id], onDelete: Cascade)
+
+  @@index([createdAt])
+  @@index([userId])
+}
+
+model conversation_members {
+  id             String        @id
+  conversationId String
+  userId         String
+  role           MemberRole    @default(MEMBER)
+  isMuted        Boolean       @default(false)
+  isPinned       Boolean       @default(false)
+  lastReadAt     DateTime?
+  joinedAt       DateTime      @default(now())
+  conversations  conversations @relation(fields: [conversationId], references: [id], onDelete: Cascade)
+  User           User          @relation(fields: [userId], references: [id], onDelete: Cascade)
+
+  @@unique([conversationId, userId])
+  @@index([userId])
+}
+
+model conversations {
+  id                   String                 @id
+  type                 ConversationType
+  name                 String?
+  image                String?
+  description          String?
+  roomId               String?
+  agencyId             String?
+  isActive             Boolean                @default(true)
+  createdAt            DateTime               @default(now())
+  updatedAt            DateTime
+  chat_messages        chat_messages[]
+  conversation_members conversation_members[]
+  rooms                rooms?                 @relation(fields: [roomId], references: [id])
+
+  @@index([agencyId])
+  @@index([roomId])
+  @@index([type])
+}
+
+model gift_transactions {
+  id                                      String   @id
+  giftId                                  String
+  senderId                                String
+  receiverId                              String
+  roomId                                  String
+  quantity                                Int      @default(1)
+  totalCoins                              Int
+  createdAt                               DateTime @default(now())
+  gifts                                   gifts    @relation(fields: [giftId], references: [id], onDelete: Cascade)
+  User_gift_transactions_receiverIdToUser User     @relation("gift_transactions_receiverIdToUser", fields: [receiverId], references: [id], onDelete: Cascade)
+  rooms                                   rooms    @relation(fields: [roomId], references: [id], onDelete: Cascade)
+  User_gift_transactions_senderIdToUser   User     @relation("gift_transactions_senderIdToUser", fields: [senderId], references: [id], onDelete: Cascade)
+
+  @@index([giftId])
+  @@index([receiverId])
+  @@index([roomId])
+  @@index([senderId])
+}
+
+model gifts {
+  id                String              @id
+  name              String
+  nameAr            String
+  animationUrl      String
+  thumbnailUrl      String
+  coinPrice         Int
+  category          String
+  isActive          Boolean             @default(true)
+  isVipOnly         Boolean             @default(false)
+  isLegendary       Boolean             @default(false)
+  comboCount        Int                 @default(3)
+  minTier           String?
+  createdAt         DateTime            @default(now())
+  gift_transactions gift_transactions[]
+}
+
+model icon_audit_logs {
+  id         String     @id
+  iconId     String
+  adminId    String?
+  action     IconAction
+  oldVersion Int?
+  newVersion Int?
+  oldUrl     String?
+  newUrl     String?
+  ipAddress  String?
+  userAgent  String?
+  metadata   Json?
+  createdAt  DateTime   @default(now())
+  app_icons  app_icons  @relation(fields: [iconId], references: [id], onDelete: Cascade)
+
+  @@index([adminId])
+  @@index([createdAt])
+  @@index([iconId])
+}
+
+model icon_versions {
+  id           String    @id
+  iconId       String
   version      Int
-  imageUrl     String?
-  thumbnailUrl String?
-  mimeType     String?
-  hash         String?
-  sizeBytes    Int?
-  updatedBy    String?
+  url          String
+  storagePath  String
+  mimeType     String
+  width        Int?
+  height       Int?
+  size         Int?
+  uploadedById String?
+  createdAt    DateTime  @default(now())
+  app_icons    app_icons @relation(fields: [iconId], references: [id], onDelete: Cascade)
+
+  @@index([iconId])
+  @@index([iconId, version])
+}
+
+model message_attachments {
+  id            String         @id
+  messageId     String
+  type          AttachmentType
+  url           String
+  thumbnail     String?
+  sizeBytes     Int?
+  durationSecs  Int?
+  createdAt     DateTime       @default(now())
+  chat_messages chat_messages  @relation(fields: [messageId], references: [id], onDelete: Cascade)
+
+  @@index([messageId])
+}
+
+model message_reactions {
+  id            String        @id
+  messageId     String
+  userId        String
+  emoji         String
+  createdAt     DateTime      @default(now())
+  chat_messages chat_messages @relation(fields: [messageId], references: [id], onDelete: Cascade)
+  User          User          @relation(fields: [userId], references: [id], onDelete: Cascade)
+
+  @@unique([messageId, userId, emoji])
+  @@index([messageId])
+}
+
+model message_reads {
+  id            String        @id
+  messageId     String
+  userId        String
+  readAt        DateTime      @default(now())
+  chat_messages chat_messages @relation(fields: [messageId], references: [id], onDelete: Cascade)
+  User          User          @relation(fields: [userId], references: [id], onDelete: Cascade)
+
+  @@unique([messageId, userId])
+  @@index([userId])
+}
+
+model otp_codes {
+  id        String   @id
+  phone     String
+  code      String
+  expiresAt DateTime
+  role      Role?
+  used      Boolean  @default(false)
+  userId    String?
+  createdAt DateTime @default(now())
+  User      User?    @relation(fields: [userId], references: [id])
+
+  @@index([expiresAt])
+  @@index([phone])
+  @@index([userId])
+}
+
+model password_reset_tokens {
+  id        String   @id
+  token     String   @unique
+  userId    String
+  expiresAt DateTime
+  used      Boolean  @default(false)
+  createdAt DateTime @default(now())
+  User      User     @relation(fields: [userId], references: [id], onDelete: Cascade)
+
+  @@index([expiresAt])
+  @@index([userId])
+}
+
+model payment_orders {
+  id            String         @id
+  userId        String
+  receiptId     String?        @unique
+  platform      InAppPlatform?
+  type          PaymentType
+  itemId        String
+  amountEGP     Float
+  amountCents   Int
+  currency      String         @default("EGP")
+  status        PaymentStatus  @default(PENDING)
+  paidAt        DateTime?
+  failureReason String?
+  receiptData   Json?
+  createdAt     DateTime       @default(now())
+  updatedAt     DateTime
+  User          User           @relation(fields: [userId], references: [id])
+
+  @@index([userId])
+}
+
+model post_bookmarks {
+  id        String   @id
+  postId    String
+  userId    String
+  createdAt DateTime @default(now())
+  posts     posts    @relation(fields: [postId], references: [id], onDelete: Cascade)
+  User      User     @relation(fields: [userId], references: [id], onDelete: Cascade)
+
+  @@unique([postId, userId])
+  @@index([postId])
+  @@index([userId])
+}
+
+model post_comments {
+  id        String   @id
+  postId    String
+  userId    String
+  content   String
+  createdAt DateTime @default(now())
+  posts     posts    @relation(fields: [postId], references: [id], onDelete: Cascade)
+  User      User     @relation(fields: [userId], references: [id], onDelete: Cascade)
+
+  @@index([postId, createdAt])
+  @@index([userId])
+}
+
+model post_likes {
+  id        String   @id
+  postId    String
+  userId    String
+  createdAt DateTime @default(now())
+  posts     posts    @relation(fields: [postId], references: [id], onDelete: Cascade)
+  User      User     @relation(fields: [userId], references: [id], onDelete: Cascade)
+
+  @@unique([postId, userId])
+  @@index([postId])
+  @@index([userId])
+}
+
+model post_reports {
+  id         String    @id
+  postId     String
+  reporterId String
+  reason     String
+  details    String?
+  resolved   Boolean   @default(false)
+  resolvedAt DateTime?
+  resolvedBy String?
+  resolution String?
+  createdAt  DateTime  @default(now())
+  posts      posts     @relation(fields: [postId], references: [id], onDelete: Cascade)
+  User       User      @relation(fields: [reporterId], references: [id], onDelete: Cascade)
+
+  @@unique([postId, reporterId])
+  @@index([postId])
+  @@index([reporterId])
+  @@index([resolved, createdAt])
+}
+
+model post_views {
+  id        String   @id
+  postId    String
+  userId    String
+  createdAt DateTime @default(now())
+  posts     posts    @relation(fields: [postId], references: [id], onDelete: Cascade)
+  User      User     @relation(fields: [userId], references: [id], onDelete: Cascade)
+
+  @@unique([postId, userId])
+  @@index([postId])
+  @@index([userId])
+}
+
+model posts {
+  id             String           @id
+  userId         String
+  content        String?
+  mediaUrls      Json             @default("[]")
+  visibility     PostVisibility   @default(PUBLIC)
+  viewsCount     Int              @default(0)
+  createdAt      DateTime         @default(now())
+  updatedAt      DateTime
+  post_bookmarks post_bookmarks[]
+  post_comments  post_comments[]
+  post_likes     post_likes[]
+  post_reports   post_reports[]
+  post_views     post_views[]
+  User           User             @relation(fields: [userId], references: [id], onDelete: Cascade)
+
+  @@index([content])
+  @@index([createdAt])
+  @@index([userId])
+  @@index([visibility, content])
+  @@index([visibility, createdAt])
+}
+
+model refresh_tokens {
+  id        String   @id
+  token     String   @unique
+  userId    String
+  expiresAt DateTime
+  createdAt DateTime @default(now())
+  User      User     @relation(fields: [userId], references: [id], onDelete: Cascade)
+
+  @@index([expiresAt])
+  @@index([userId])
+}
+
+model reports {
+  id                                String       @id
+  reporterId                        String
+  reportedUserId                    String
+  roomId                            String?
+  reason                            String
+  description                       String?
+  status                            ReportStatus @default(PENDING)
+  adminNote                         String?
+  reviewedById                      String?
+  reviewedAt                        DateTime?
+  createdAt                         DateTime     @default(now())
+  User_reports_reportedUserIdToUser User         @relation("reports_reportedUserIdToUser", fields: [reportedUserId], references: [id])
+  User_reports_reporterIdToUser     User         @relation("reports_reporterIdToUser", fields: [reporterId], references: [id])
+  User_reports_reviewedByIdToUser   User?        @relation("reports_reviewedByIdToUser", fields: [reviewedById], references: [id])
+  rooms                             rooms?       @relation(fields: [roomId], references: [id])
+
+  @@index([reportedUserId])
+  @@index([reporterId])
+}
+
+model room_likes {
+  id        String   @id
+  roomId    String
+  userId    String
+  createdAt DateTime @default(now())
+  rooms     rooms    @relation(fields: [roomId], references: [id], onDelete: Cascade)
+  User      User     @relation(fields: [userId], references: [id], onDelete: Cascade)
+
+  @@unique([roomId, userId])
+  @@index([createdAt])
+  @@index([roomId])
+  @@index([userId])
+}
+
+model room_messages {
+  id        String   @id
+  roomId    String
+  userId    String
+  text      String
+  createdAt DateTime @default(now())
+  rooms     rooms    @relation(fields: [roomId], references: [id], onDelete: Cascade)
+  User      User     @relation(fields: [userId], references: [id], onDelete: Cascade)
+
+  @@index([createdAt])
+  @@index([roomId])
+  @@index([userId])
+}
+
+model room_participants {
+  id       String   @id
+  roomId   String
+  userId   String
+  role     String   @default("AUDIENCE")
+  joinedAt DateTime @default(now())
+  rooms    rooms    @relation(fields: [roomId], references: [id], onDelete: Cascade)
+  User     User     @relation(fields: [userId], references: [id], onDelete: Cascade)
+
+  @@unique([roomId, userId])
+  @@index([roomId])
+  @@index([userId])
+}
+
+model rooms {
+  id                String              @id
+  name              String
+  image             String?
+  isPrivate         Boolean             @default(false)
+  maxSeats          Int                 @default(20)
+  isActive          Boolean             @default(true)
+  topic             String?
+  description       String?
+  ownerId           String
+  createdAt         DateTime            @default(now())
+  closedAt          DateTime?
+  category          String              @default("talk")
+  passwordHash      String?
+  tags              Json?
+  RoomRecording     RoomRecording[]
+  conversations     conversations[]
+  gift_transactions gift_transactions[]
+  reports           reports[]
+  room_likes        room_likes[]
+  room_messages     room_messages[]
+  room_participants room_participants[]
+  User              User                @relation(fields: [ownerId], references: [id], onDelete: Cascade)
+  seat_requests     seat_requests[]
+  seats             seats[]
+
+  @@index([createdAt])
+  @@index([isActive])
+  @@index([isActive, name])
+  @@index([isActive, topic])
+  @@index([name])
+  @@index([ownerId])
+  @@index([topic])
+}
+
+model seat_requests {
+  id        String            @id
+  roomId    String
+  userId    String
+  status    SeatRequestStatus @default(PENDING)
+  createdAt DateTime          @default(now())
+  updatedAt DateTime
+  rooms     rooms             @relation(fields: [roomId], references: [id], onDelete: Cascade)
+  User      User              @relation(fields: [userId], references: [id], onDelete: Cascade)
+
+  @@index([roomId, status])
+  @@index([userId])
+}
+
+model seats {
+  id          String    @id
+  roomId      String
+  userId      String?
+  seatIndex   Int
+  isMuted     Boolean   @default(false)
+  joinedAt    DateTime?
+  forceMuted  Boolean   @default(false)
+  isModerator Boolean   @default(false)
+  rooms       rooms     @relation(fields: [roomId], references: [id], onDelete: Cascade)
+  User        User?     @relation(fields: [userId], references: [id])
+
+  @@unique([roomId, seatIndex])
+  @@index([roomId])
+  @@index([userId])
+}
+
+model social_accounts {
+  id         String   @id
+  provider   String
+  providerId String
+  userId     String
+  createdAt  DateTime @default(now())
+  User       User     @relation(fields: [userId], references: [id], onDelete: Cascade)
+
+  @@unique([provider, providerId])
+  @@index([userId])
+}
+
+model topics {
+  id            String   @id
+  hashtag       String   @unique
+  thumbnailUrl  String?
+  isArabic      Boolean  @default(false)
+  newPostsCount Int      @default(0)
+  isHot         Boolean  @default(false)
+  createdAt     DateTime @default(now())
+
+  @@index([newPostsCount])
+}
+
+model user_level_events {
+  id        String   @id
+  userId    String
+  eventType String
+  xpAmount  Int      @default(0)
+  metadata  Json?
+  createdAt DateTime @default(now())
+  User      User     @relation(fields: [userId], references: [id], onDelete: Cascade)
+
+  @@index([userId, createdAt])
+}
+
+model user_wallets {
+  id          String   @id
+  userId      String   @unique
+  coinBalance Int      @default(0)
+  totalEarned Int      @default(0)
+  totalSpent  Int      @default(0)
+  updatedAt   DateTime
+  User        User     @relation(fields: [userId], references: [id], onDelete: Cascade)
+}
+
+model user_warnings {
+  id        String   @id
+  userId    String
+  reason    String
+  sourceId  String?
+  createdAt DateTime @default(now())
+  User      User     @relation(fields: [userId], references: [id])
+
+  @@index([userId])
+}
+
+model vip_spend_ledger {
+  id         String   @id
+  userId     String
+  kind       String
+  sourceType String
+  sourceId   String?
+  amount     Int
+  metadata   Json?
+  createdAt  DateTime @default(now())
+  User       User     @relation(fields: [userId], references: [id], onDelete: Cascade)
+
+  @@index([sourceType, sourceId])
+  @@index([userId, createdAt])
+}
+
+model withdrawal_requests {
+  id          String           @id
+  userId      String
+  coinsAmount Int
+  usdAmount   Float
+  method      String
+  accountInfo String
+  status      WithdrawalStatus @default(PENDING)
+  adminNote   String?
+  createdAt   DateTime         @default(now())
+  resolvedAt  DateTime?
+  User        User             @relation(fields: [userId], references: [id], onDelete: Cascade)
+
+  @@index([status])
+  @@index([userId])
+}
+
+enum AccountStatus {
+  ACTIVE
+  SUSPENDED
+  BANNED
+  PENDING_APPROVAL
+  REJECTED
+}
+
+enum AccountType {
+  USER
+  AGENCY
+}
+
+enum AdminRole {
+  SUPER_ADMIN
+  ADMIN
+  MODERATOR
+  SUPPORT
+}
+
+enum AgencyRequestStatus {
+  PENDING
+  APPROVED
+  REJECTED
+}
+
+enum AgentStatus {
+  ACTIVE
+  SUSPENDED
+  BANNED
+}
+
+enum AgentTier {
+  BRONZE
+  SILVER
+  GOLD
+  PLATINUM
+  DIAMOND
+}
+
+enum AttachmentType {
+  IMAGE
+  VOICE
+  VIDEO
+  DOCUMENT
+  GIF
+  STICKER
+  GIFT
+}
+
+enum AuditAction {
+  REGISTER
+  LOGIN
+  LOGOUT
+  PASSWORD_CHANGE
+  PROFILE_UPDATE
+  VIP_PURCHASE
+  ADMIN_ACTION
+  AGENCY_REGISTER
+  AGENCY_APPROVED
+  AGENCY_REJECTED
+  AGENCY_SUSPENDED
+}
+
+enum BanType {
+  ONE_DAY
+  THREE_DAYS
+  NETWORK
+}
+
+enum BannedSeverity {
+  MILD
+  SEVERE
+  CRITICAL
+}
+
+enum CoinTxType {
+  PURCHASE
+  GIFT_SENT
+  GIFT_RECEIVED
+  WITHDRAWAL
+  BONUS
+  REFUND
+}
+
+enum CommissionSource {
+  GIFT_SENT
+  VIP_PURCHASE
+  COIN_PURCHASE
+}
+
+enum ConversationType {
+  PRIVATE
+  GROUP
+  ROOM
+  AGENCY
+  SUPPORT
+}
+
+enum IconAction {
+  UPLOAD
+  REPLACE
+  DELETE
+  RESTORE
+  PUBLISH
+  ROLLBACK
+  REVERT_TO_DEFAULT
+}
+
+enum IconCategory {
+  NAVIGATION
+  ROOM
+  VOICE
+  SOCIAL
+  WALLET
+  VIP
+  MEDIA
+  STATUS
+  SETTINGS
+  ADMIN
+  ACTIONS
+  STORE
+}
+
+enum InAppPlatform {
+  iOS
+  ANDROID
+}
+
+enum MemberRole {
+  MEMBER
+  ADMIN
+  MODERATOR
+  OWNER
+}
+
+enum MessageStatus {
+  SENDING
+  SENT
+  DELIVERED
+  READ
+  FAILED
+}
+
+enum MessageType {
+  TEXT
+  IMAGE
+  VOICE
+  GIF
+  STICKER
+  GIFT
+  EMOJI
+}
+
+enum NotificationType {
+  GIFT_RECEIVED
+  NEW_FOLLOWER
+  ROOM_INVITE
+  VIP_EXPIRING
+  VIP_EXPIRED
+  VIP_RENEWED
+  VIP_RENEWAL_FAILED
+  LEVEL_UP
+  ROOM_STARTED
+  SEAT_REQUEST
+  SEAT_ACCEPTED
+  SEAT_REJECTED
+  SYSTEM
+  AGENCY_APPROVED
+  AGENCY_REJECTED
+  AGENCY_SUSPENDED
+}
+
+enum PaymentStatus {
+  PENDING
+  PROCESSING
+  SUCCESS
+  FAILED
+  REFUNDED
+}
+
+enum PaymentType {
+  COIN_PURCHASE
+  VIP_SUBSCRIPTION
+}
+
+enum PostVisibility {
+  PUBLIC
+  FOLLOWERS
+  PRIVATE
+}
+
+enum RecordingStatus {
+  PROCESSING
+  READY
+  FAILED
+}
+
+enum ReferralStatus {
+  PENDING
+  ACTIVE
+  INACTIVE
+}
+
+enum ReportStatus {
+  PENDING
+  ACTION_TAKEN
+  DISMISSED
+}
+
+enum Role {
+  USER
+  HOST
+  VIP
+  SVIP
+  AGENT
+  MODERATOR
+  SUPER_ADMIN
+  ADMIN
+}
+
+enum SeatRequestStatus {
+  PENDING
+  ACCEPTED
+  REJECTED
+  CANCELLED
+}
+
+enum SubscriptionStatus {
+  NONE
+  ACTIVE
+  EXPIRED
+  PENDING
+  CANCELLED
+  REFUNDED
+}
+
+enum WithdrawalStatus {
+  PENDING
+  APPROVED
+  REJECTED
+  PAID
+}
+
+enum VipTier {
+  NONE
+  VIP
+  SVIP_1
+  SVIP_2
+  SVIP_3
+  SVIP_4
+  SVIP_5
+  TEST_VIP
+  TEST_SVIP
+}
+
+model AppAsset {
+  id                String               @id @default(cuid())
+  key               String               @unique
+  name              String
+  category          String
+  imageUrl          String?
+  thumbnailUrl      String?
+  mimeType          String?
+  hash              String?
+  sizeBytes         Int?
+  width             Int?
+  height            Int?
+  version           Int                  @default(1)
+  isActive          Boolean              @default(true)
+  deletedAt         DateTime?
+  updatedBy         String?
+  createdAt         DateTime             @default(now())
+  updatedAt         DateTime             @updatedAt
+  versions          AppAssetVersion[]
+  auditLogs         AppAssetAuditLog[]
+
+  @@index([category])
+  @@index([deletedAt])
+}
+
+model AppAssetVersion {
+  id            String    @id @default(cuid())
+  assetId       String
+  version       Int
+  imageUrl      String?
+  thumbnailUrl  String?
+  mimeType      String?
+  hash          String?
+  sizeBytes     Int?
+  updatedBy     String?
   updatedByName String?
-  changeNote   String?
-  createdAt    DateTime @default(now())
+  changeNote    String?
+  createdAt     DateTime  @default(now())
+  asset         AppAsset  @relation(fields: [assetId], references: [id], onDelete: Cascade)
 
   @@index([assetId])
   @@index([version])
 }
 
-/// Full audit trail for every asset operation
 model AppAssetAuditLog {
-  id          String    @id @default(cuid())
-  assetId     String?
-  asset       AppAsset? @relation(fields: [assetId], references: [id], onDelete: SetNull)
-  /// "CREATE" | "UPDATE" | "DELETE" | "RESTORE" | "ENABLE" | "DISABLE" | "ROLLBACK" | "SEED"
-  action      String
-  adminId     String
-  adminName   String
-  adminEmail  String
-  /// JSON: before/after values, file info, etc.
-  metadata    String?
-  ipAddress   String?
-  userAgent   String?
-  createdAt   DateTime  @default(now())
+  id         String    @id @default(cuid())
+  assetId    String?
+  action     String
+  adminId    String
+  adminName  String
+  adminEmail String
+  ipAddress  String?
+  userAgent  String?
+  metadata   String?
+  createdAt  DateTime  @default(now())
+  asset      AppAsset? @relation(fields: [assetId], references: [id], onDelete: SetNull)
 
   @@index([assetId])
-  @@index([adminId])
   @@index([action])
-  @@index([createdAt])
+  @@index([adminId])
 }
 
-/// Catalog version singleton for AppAsset — ETag for Flutter's conditional GET
 model AppAssetCatalogVersion {
-  id        String   @id @default("singleton")
+  id        String   @id
   version   Int      @default(1)
   etag      String
   updatedAt DateTime @updatedAt
 }
+

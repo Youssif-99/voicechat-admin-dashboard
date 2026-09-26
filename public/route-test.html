@@ -1,0 +1,81 @@
+<!DOCTYPE html>
+<html>
+<head>
+    <title>Route Test</title>
+    <style>
+        body { font-family: monospace; padding: 20px; background: #1a1a1a; color: #fff; }
+        .test { margin: 10px 0; padding: 10px; background: #2a2a2a; border-radius: 5px; }
+        .success { border-left: 4px solid #4caf50; }
+        .error { border-left: 4px solid #f44336; }
+        button { padding: 10px 20px; margin: 5px; cursor: pointer; }
+    </style>
+</head>
+<body>
+    <h1>Admin Dashboard Route Test</h1>
+    <div id="results"></div>
+    
+    <h2>Test Navigation</h2>
+    <button onclick="testRoute('/dashboard')">Test /dashboard</button>
+    <button onclick="testRoute('/icons')">Test /icons</button>
+    <button onclick="testRoute('/users')">Test /users</button>
+    <button onclick="testRoute('/rooms')">Test /rooms</button>
+    <button onclick="testRoute('/agencies')">Test /agencies</button>
+    
+    <script>
+        async function testRoute(path) {
+            const results = document.getElementById('results');
+            const testDiv = document.createElement('div');
+            testDiv.className = 'test';
+            testDiv.innerHTML = `Testing ${path}...`;
+            results.appendChild(testDiv);
+            
+            try {
+                const response = await fetch(path, {
+                    credentials: 'include',
+                    redirect: 'manual'
+                });
+                
+                const html = await response.text();
+                
+                // Check if response contains expected content
+                const checks = {
+                    '/dashboard': 'نظرة عامة',
+                    '/icons': 'أيقونات شريط التنقل',
+                    '/users': 'إدارة المستخدمين',
+                    '/rooms': 'إدارة الغرف',
+                    '/agencies': 'الوكالات'
+                };
+                
+                const expectedText = checks[path];
+                const found = html.includes(expectedText);
+                
+                testDiv.className = found ? 'test success' : 'test error';
+                testDiv.innerHTML = `
+                    <strong>${path}</strong><br>
+                    Status: ${response.status}<br>
+                    Expected text: "${expectedText}"<br>
+                    Found: ${found ? 'YES ✓' : 'NO ✗'}<br>
+                    ${response.redirected ? `Redirected to: ${response.url}` : ''}
+                `;
+                
+                if (!found && html.length > 0) {
+                    const preview = html.substring(html.indexOf('<title>'), html.indexOf('</title>') + 8);
+                    testDiv.innerHTML += `<br>Title: ${preview}`;
+                }
+            } catch (err) {
+                testDiv.className = 'test error';
+                testDiv.innerHTML = `<strong>${path}</strong><br>Error: ${err.message}`;
+            }
+        }
+        
+        // Auto-test on load
+        window.onload = () => {
+            console.log('Current URL:', window.location.href);
+            console.log('Running auto-tests...');
+            setTimeout(() => testRoute('/dashboard'), 500);
+            setTimeout(() => testRoute('/icons'), 1000);
+            setTimeout(() => testRoute('/users'), 1500);
+        };
+    </script>
+</body>
+</html>

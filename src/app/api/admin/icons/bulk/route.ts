@@ -65,7 +65,7 @@ export async function POST(req: NextRequest) {
     for (const item of metaArray) {
       const r = MetaItemSchema.safeParse(item);
       if (!r.success) {
-        validationErrors.push(`${(item as any)?.key ?? "?"}: ${JSON.stringify(r.error.flatten())}`);
+        validationErrors.push(`${(item as Record<string, unknown>)?.key ?? "?"}: ${JSON.stringify(r.error.flatten())}`);
       } else {
         validated.push(r.data);
       }
@@ -90,14 +90,22 @@ export async function POST(req: NextRequest) {
         const pngFile = formData.get(`png_${meta.key}`) as File | null;
 
         if (svgFile && svgFile.size > 0) {
-          const buf = Buffer.from(await svgFile.arrayBuffer());
+          const buf    = Buffer.from(await svgFile.arrayBuffer());
           const result = await uploadIcon(buf, svgFile.name);
-          svgUrl = result.url; svgHash = result.hash;
+          if (!result.success) {
+            uploadErrors.push(`${meta.key} (svg): ${result.error}`);
+            continue;
+          }
+          svgUrl = result.data.url; svgHash = result.data.hash;
         }
         if (pngFile && pngFile.size > 0) {
-          const buf = Buffer.from(await pngFile.arrayBuffer());
+          const buf    = Buffer.from(await pngFile.arrayBuffer());
           const result = await uploadIcon(buf, pngFile.name);
-          pngUrl = result.url; pngHash = result.hash;
+          if (!result.success) {
+            uploadErrors.push(`${meta.key} (png): ${result.error}`);
+            continue;
+          }
+          pngUrl = result.data.url; pngHash = result.data.hash;
         }
 
         inputs.push({ ...meta, svgUrl, pngUrl, svgHash, pngHash });

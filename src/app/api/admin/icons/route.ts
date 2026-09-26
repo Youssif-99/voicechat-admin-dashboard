@@ -137,11 +137,21 @@ export async function POST(req: NextRequest) {
 
     if (svgFile && svgFile.size > 0) {
       const r = await uploadIcon(Buffer.from(await svgFile.arrayBuffer()), svgFile.name);
-      svgUrl = r.url; svgHash = r.hash;
+      if (!r.success) {
+        return applySecurityHeaders(
+          NextResponse.json({ error: r.error }, { status: 422 })
+        );
+      }
+      svgUrl = r.data.url; svgHash = r.data.hash;
     }
     if (pngFile && pngFile.size > 0) {
       const r = await uploadIcon(Buffer.from(await pngFile.arrayBuffer()), pngFile.name);
-      pngUrl = r.url; pngHash = r.hash;
+      if (!r.success) {
+        return applySecurityHeaders(
+          NextResponse.json({ error: r.error }, { status: 422 })
+        );
+      }
+      pngUrl = r.data.url; pngHash = r.data.hash;
     }
 
     const icon = await IconRepository.create(

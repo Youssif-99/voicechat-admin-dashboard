@@ -2,7 +2,7 @@
 
 import { revalidatePath } from "next/cache";
 import { requireRole } from "@/lib/auth";
-import { agenciesApi, ApiError } from "@/lib/api-client";
+import { agenciesApi } from "@/lib/api-client";
 import { notifyAgency } from "@/lib/notify";
 
 // ── Guards ─────────────────────────────────────────────────────────────────
@@ -11,9 +11,8 @@ async function requireAgencyAdmin() {
   return requireRole("ADMIN");
 }
 
-async function requireAgencyViewer() {
-  return requireRole("SUPPORT");
-}
+// requireAgencyViewer reserved for future read-only guard
+// async function requireAgencyViewer() { return requireRole("SUPPORT"); }
 
 // ── Helper ─────────────────────────────────────────────────────────────────
 

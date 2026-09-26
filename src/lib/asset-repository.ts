@@ -421,19 +421,41 @@ export const AssetRepository = {
 
   // ── SEED DEFAULTS ─────────────────────────────────────────────
 
+  /**
+   * Seeds all provided definitions as AppAsset records, skipping any
+   * whose key already exists.
+   *
+   * Uses a single query to find all existing keys (avoids N lookups),
+   * then creates missing assets in concurrent batches of 5 to stay
+   * within Neon's connection pool limits.
+   */
   async seedDefaults(
     definitions: Array<{ key: string; name: string; category: string }>,
     audit: AssetAuditContext
   ): Promise<{ created: number; skipped: number }> {
-    let created = 0, skipped = 0;
+    // 1. Find all already-existing keys in one query
+    const keys    = definitions.map((d) => d.key);
+    const existing = await prisma.appAsset.findMany({
+      where:  { key: { in: keys } },
+      select: { key: true },
+    });
+    const existingKeys = new Set(existing.map((e) => e.key));
 
-    for (const def of definitions) {
-      try {
-        const existing = await prisma.appAsset.findUnique({ where: { key: def.key } });
-        if (existing) { skipped++; continue; }
-        await AssetRepository.create(def, audit);
-        created++;
-      } catch { skipped++; }
+    const toCreate = definitions.filter((d) => !existingKeys.has(d.key));
+    const skipped  = definitions.length - toCreate.length;
+    let   created  = 0;
+
+    // 2. Create missing assets in concurrent batches of 5
+    const BATCH_SIZE = 5;
+    for (let i = 0; i < toCreate.length; i += BATCH_SIZE) {
+      const batch   = toCreate.slice(i, i + BATCH_SIZE);
+      const results = await Promise.allSettled(
+        batch.map((def) => AssetRepository.create(def, audit))
+      );
+      for (const r of results) {
+        if (r.status === "fulfilled") created++;
+        // silently skip failed — key constraint races etc.
+      }
     }
 
     await prisma.appAssetAuditLog.create({

@@ -234,6 +234,7 @@ function AssetCard({ asset, versions, categories }: {
       <div className="flex items-start justify-between gap-2">
         <div className="w-16 h-16 rounded-xl border border-base-border bg-base-surface2 flex items-center justify-center overflow-hidden flex-shrink-0">
           {previewSrc
+            // eslint-disable-next-line @next/next/no-img-element
             ? <img src={previewSrc} alt={asset.name} className="max-w-full max-h-full object-contain" />
             : <span className="text-text-muted/30 text-2xl">◻</span>}
         </div>

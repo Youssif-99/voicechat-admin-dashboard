@@ -1,1 +1,1 @@
-self.__REACT_LOADABLE_MANIFEST="{}";
+self.__REACT_LOADABLE_MANIFEST='{"app\\\\(dashboard)\\\\gifts\\\\GiftsManager.tsx -> lottie-web":{"id":2584,"files":["static/chunks/dc112a36.02bc2031141cd19b.js"]}}';

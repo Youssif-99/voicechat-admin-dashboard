@@ -2,7 +2,8 @@ import { getSession } from "@/lib/auth";
 import { bannersApi } from "@/lib/api-client";
 import { Header } from "@/components/Header";
 import { ActionButton } from "@/components/ActionButton";
-import { createBanner, updateBanner, deleteBanner, toggleBanner, reorderBanners } from "./actions";
+import { createBanner, deleteBanner, toggleBanner } from "./actions";
+import { BannerImage } from "./BannerImage";
 
 export const dynamic = "force-dynamic";
 
@@ -71,8 +72,7 @@ export default async function BannersPage() {
             <div key={b.id} className={`bg-base-surface border rounded-card shadow-card overflow-hidden flex gap-0 ${b.enabled ? "border-base-border" : "border-base-border/40 opacity-60"}`}>
               {/* Preview */}
               <div className="w-40 shrink-0 bg-base-surface2 overflow-hidden">
-                {/* eslint-disable-next-line @next/next/no-img-element */}
-                <img src={b.imageUrl} alt={b.title} className="w-full h-full object-cover" onError={(e) => { (e.currentTarget as HTMLImageElement).style.display = "none"; }} />
+                <BannerImage src={b.imageUrl} alt={b.title} />
               </div>
 
               {/* Info */}

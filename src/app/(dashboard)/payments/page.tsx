@@ -34,7 +34,7 @@ export default async function PaymentsPage({
       .catch(() => ({ grandTotal: 0, byType: {}, byStatus: {}, recentCount: 0 })),
   ]);
 
-  const { data: payments, total, pages } = paymentsResult;
+  const { data: payments, pages } = paymentsResult;
   const stats = statsResult;
 
   return (

@@ -1,4 +1,4 @@
-// File: E:\voice-admin-dashboard\src\app\(dashboard)\icons\page.tsx
+// File: E:\voicechat\voice-admin-dashboard\src\app\(dashboard)\icons\page.tsx
 import * as entry from '../../../../../src/app/(dashboard)/icons/page.js'
 import type { ResolvingMetadata, ResolvingViewport } from 'next/dist/lib/metadata/types/metadata-interface.js'
 

@@ -2,6 +2,17 @@
 @tailwind components;
 @tailwind utilities;
 
+/* ── Font variables ──────────────────────────────────────────────────────────
+   Previously set by next/font/google. Now set here so removing next/font/google
+   from layout.tsx doesn't break any tailwind/css font-family references.
+   The actual font files are loaded via <link> in layout.tsx.
+   ─────────────────────────────────────────────────────────────────────────── */
+:root {
+  --font-almarai:   "Almarai",  "Noto Sans Arabic", Arial, sans-serif;
+  --font-tajawal:   "Tajawal",  "Noto Sans Arabic", Arial, sans-serif;
+  --font-plex-mono: "IBM Plex Mono", "Courier New", Courier, monospace;
+}
+
 * {
   border-color: theme("colors.base.border");
 }

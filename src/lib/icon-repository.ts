@@ -1,20 +1,59 @@
 /**
- * IconRepository — single point of contact for all icon DB operations.
- * Follows the Repository Pattern: callers never write raw Prisma queries.
+ * IconRepository — adapts Admin Dashboard to work with actual app_icons schema.
  *
- * All mutating methods automatically:
- *   1. Snapshot the previous state into IconVersion
- *   2. Write an IconAuditLog entry
- *   3. Bump the IconCatalogVersion ETag
+ * Backend uses app_icons table with:
+ *   - url (single canonical URL)
+ *   - storagePath (Cloudinary path)
+ *   - version, etag
+ *   - isActive, isPublished, isPending
+ *   - defaultUrl (fallback)
+ *
+ * This repository provides CRUD operations via the backend /api/admin/icons API.
  */
 
-import { prisma } from "@/lib/prisma";
-import { createHash } from "crypto";
-import type { Icon, IconVersion, IconAuditLog, Prisma } from "@prisma/client";
+import { api } from "@/lib/api-client";
 
-// ── Types ──────────────────────────────────────────────────────────────────
+// ── Types matching backend API ─────────────────────────────────────────────
 
-export type IconWithVersions = Icon & { versions: IconVersion[] };
+export type AppIcon = {
+  id: string;
+  key: string;
+  category: string;
+  displayName: string;
+  type?: "svg" | "png" | "both";
+  url?: string;
+  svgUrl?: string | null;
+  pngUrl?: string | null;
+  svgHash?: string | null;
+  pngHash?: string | null;
+  storagePath?: string;
+  mimeType?: string;
+  width?: number | null;
+  height?: number | null;
+  size?: number | null;
+  version: number;
+  isActive: boolean;
+  isPublished?: boolean;
+  isPending?: boolean;
+  etag?: string | null;
+  defaultUrl?: string;
+  deletedAt?: string | null;
+  createdById?: string | null;
+  updatedById?: string | null;
+  publishedAt?: string | null;
+  createdAt: string;
+  updatedAt: string;
+};
+
+export type IconWithVersions = AppIcon & { 
+  versions?: Array<{
+    id: string;
+    version: number;
+    url: string;
+    createdAt: string;
+  }>;
+};
+
 export type AuditContext = {
   adminId: string;
   adminName: string;
@@ -22,485 +61,206 @@ export type AuditContext = {
   ipAddress?: string;
   userAgent?: string;
 };
-export type CreateIconInput = {
-  key: string;
-  displayName: string;
-  category: string;
-  type: "svg" | "png" | "both";
-  svgUrl?: string;
-  pngUrl?: string;
-  svgHash?: string;
-  pngHash?: string;
-  changeNote?: string;
-};
-export type UpdateIconInput = Partial<Omit<CreateIconInput, "key">> & {
-  enabled?: boolean;
-};
+
 export type IconListFilter = {
   category?: string;
-  enabled?: boolean;
   search?: string;
+  pendingOnly?: boolean;
+  enabled?: boolean;
   includeDeleted?: boolean;
   page?: number;
   pageSize?: number;
 };
 
-// ── Catalog ETag helper ────────────────────────────────────────────────────
-
-async function bumpCatalogVersion(tx: Prisma.TransactionClient): Promise<void> {
-  const etag = createHash("sha256")
-    .update(`${Date.now()}-${Math.random()}`)
-    .digest("hex")
-    .slice(0, 32);
-
-  await tx.iconCatalogVersion.upsert({
-    where: { id: "singleton" },
-    update: { version: { increment: 1 }, etag },
-    create: { id: "singleton", version: 1, etag },
-  });
-}
-
-// ── Snapshot helper ────────────────────────────────────────────────────────
-
-async function snapshotVersion(
-  tx: Prisma.TransactionClient,
-  icon: Icon,
-  audit: AuditContext,
-  changeNote?: string
-): Promise<void> {
-  await tx.iconVersion.create({
-    data: {
-      iconId:       icon.id,
-      version:      icon.version,
-      svgUrl:       icon.svgUrl,
-      pngUrl:       icon.pngUrl,
-      svgHash:      icon.svgHash,
-      pngHash:      icon.pngHash,
-      type:         icon.type,
-      updatedBy:    audit.adminId,
-      updatedByName:audit.adminName,
-      changeNote:   changeNote ?? null,
-    },
-  });
-}
-
-// ── Audit helper ───────────────────────────────────────────────────────────
-
-async function writeAudit(
-  tx: Prisma.TransactionClient,
-  params: {
-    iconId?: string;
-    action: string;
-    audit: AuditContext;
-    metadata?: Record<string, unknown>;
-  }
-): Promise<void> {
-  await tx.iconAuditLog.create({
-    data: {
-      iconId:     params.iconId ?? null,
-      action:     params.action,
-      adminId:    params.audit.adminId,
-      adminName:  params.audit.adminName,
-      adminEmail: params.audit.adminEmail,
-      ipAddress:  params.audit.ipAddress ?? null,
-      userAgent:  params.audit.userAgent ?? null,
-      metadata:   params.metadata ? JSON.stringify(params.metadata) : null,
-    },
-  });
-}
-
-// ── Repository ─────────────────────────────────────────────────────────────
+// ── Repository methods using backend API ──────────────────────────────────
 
 export const IconRepository = {
   // ── READ ──────────────────────────────────────────────────────
 
-  /** Public list — enabled, non-deleted icons only */
-  async listPublic(): Promise<Icon[]> {
-    return prisma.icon.findMany({
-      where: { enabled: true, deletedAt: null },
-      orderBy: [{ category: "asc" }, { key: "asc" }],
-    });
-  },
+  /** Admin list — fetches all icons from backend API */
+  async listAdmin(filter: IconListFilter = {}): Promise<{ icons: AppIcon[]; total: number }> {
+    const params: Record<string, string> = {};
+    if (filter.category) params.category = filter.category;
+    if (filter.search) params.search = filter.search;
+    if (filter.pendingOnly) params.pendingOnly = "true";
+    if (filter.enabled !== undefined) params.enabled = String(filter.enabled);
+    if (filter.includeDeleted) params.includeDeleted = "true";
+    params.page = String(filter.page ?? 1);
+    params.limit = String(filter.pageSize ?? 100);
 
-  /** Admin list — supports filtering, pagination, soft-deleted, includes version history */
-  async listAdmin(filter: IconListFilter = {}): Promise<{ icons: IconWithVersions[]; total: number }> {
-    const {
-      category,
-      enabled,
-      search,
-      includeDeleted = false,
-      page = 1,
-      pageSize = 50,
-    } = filter;
+    const response = await api.get<{
+      success: boolean;
+      data: AppIcon[];
+      pagination: { page: number; limit: number; total: number; totalPages: number };
+    }>("/api/admin/icons", params);
 
-    const where: Prisma.IconWhereInput = {
-      deletedAt: includeDeleted ? undefined : null,
-      ...(category ? { category } : {}),
-      ...(enabled !== undefined ? { enabled } : {}),
-      ...(search
-        ? {
-            OR: [
-              { key:         { contains: search, mode: "insensitive" } },
-              { displayName: { contains: search, mode: "insensitive" } },
-              { category:    { contains: search, mode: "insensitive" } },
-            ],
-          }
-        : {}),
+    if (!response.success || !response.data) {
+      return { icons: [], total: 0 };
+    }
+
+    return {
+      icons: response.data,
+      total: response.pagination?.total ?? response.data.length,
     };
-
-    const [icons, total] = await Promise.all([
-      prisma.icon.findMany({
-        where,
-        include: { versions: { orderBy: { version: "desc" }, take: 20 } },
-        orderBy: [{ category: "asc" }, { key: "asc" }],
-        skip: (page - 1) * pageSize,
-        take: pageSize,
-      }),
-      prisma.icon.count({ where }),
-    ]);
-
-    return { icons, total };
   },
 
-  async findById(id: string): Promise<IconWithVersions | null> {
-    return prisma.icon.findUnique({
-      where: { id },
-      include: { versions: { orderBy: { version: "desc" } } },
-    });
-  },
-
-  async findByKey(key: string): Promise<Icon | null> {
-    return prisma.icon.findUnique({ where: { key } });
-  },
-
-  async getVersions(iconId: string): Promise<IconVersion[]> {
-    return prisma.iconVersion.findMany({
-      where: { iconId },
-      orderBy: { version: "desc" },
-    });
-  },
-
-  async getAuditLogs(
-    iconId?: string,
-    limit = 100
-  ): Promise<IconAuditLog[]> {
-    return prisma.iconAuditLog.findMany({
-      where: iconId ? { iconId } : undefined,
-      orderBy: { createdAt: "desc" },
-      take: limit,
-    });
-  },
-
-  /** Audit logs enriched with icon key + displayName for display in dashboard */
-  async getAuditLogsEnriched(
-    iconId?: string,
-    limit = 100
-  ): Promise<(IconAuditLog & { iconKey?: string; iconDisplayName?: string })[]> {
-    const logs = await prisma.iconAuditLog.findMany({
-      where: iconId ? { iconId } : undefined,
-      include: { icon: { select: { key: true, displayName: true } } },
-      orderBy: { createdAt: "desc" },
-      take: limit,
-    });
-    return logs.map((l) => ({
-      ...l,
-      iconKey:         (l as typeof l & { icon?: { key: string; displayName: string } | null }).icon?.key,
-      iconDisplayName: (l as typeof l & { icon?: { key: string; displayName: string } | null }).icon?.displayName,
-    }));
+  async listPublic(): Promise<AppIcon[]> {
+    const response = await api.get<{ success: boolean; data: AppIcon[] }>("/api/icons");
+    return response.data || [];
   },
 
   async getCatalogVersion(): Promise<{ version: number; etag: string } | null> {
-    return prisma.iconCatalogVersion.findUnique({ where: { id: "singleton" } });
+    const response = await api.get<{ success: boolean; data: { version: number; etag: string } }>("/api/icons/catalog-version").catch(() => null);
+    return response?.data ?? null;
   },
 
-  // ── CREATE ────────────────────────────────────────────────────
+  async getAuditLogs(iconId?: string, limit = 50): Promise<unknown[]> {
+    const params: Record<string, string> = { limit: String(limit) };
+    if (iconId) params.iconId = iconId;
+    const response = await api.get<{ success: boolean; data: unknown[] }>("/api/admin/icons/audit", params).catch(() => null);
+    return response?.data ?? [];
+  },
 
-  async create(input: CreateIconInput, audit: AuditContext): Promise<Icon> {
-    return prisma.$transaction(async (tx) => {
-      const icon = await tx.icon.create({
-        data: {
-          key:         input.key,
-          displayName: input.displayName,
-          category:    input.category,
-          type:        input.type,
-          svgUrl:      input.svgUrl ?? null,
-          pngUrl:      input.pngUrl ?? null,
-          svgHash:     input.svgHash ?? null,
-          pngHash:     input.pngHash ?? null,
-          enabled:     true,
-          version:     1,
-          updatedBy:   audit.adminId,
-        },
-      });
+  async findById(id: string): Promise<IconWithVersions | null> {
+    const response = await api.get<{
+      success: boolean;
+      data: IconWithVersions;
+    }>(`/api/admin/icons/${id}`).catch(() => null);
 
-      // Snapshot initial version
-      await snapshotVersion(tx, icon, audit, input.changeNote ?? "إنشاء أولي");
+    if (!response || !response.success) return null;
+    return response.data;
+  },
 
-      await writeAudit(tx, {
-        iconId: icon.id,
-        action: "CREATE",
-        audit,
-        metadata: { key: icon.key, category: icon.category },
-      });
+  async findByKey(key: string): Promise<AppIcon | null> {
+    const { icons } = await IconRepository.listAdmin({ search: key, pageSize: 1 });
+    return icons.find((i) => i.key === key) ?? null;
+  },
 
-      await bumpCatalogVersion(tx);
-      return icon;
-    });
+  // ── CREATE/UPLOAD ─────────────────────────────────────────────
+
+  async create(data: Record<string, unknown>, audit?: AuditContext): Promise<AppIcon> {
+    const response = await api.post<{ success: boolean; data: AppIcon }>("/api/admin/icons", { ...data, audit });
+    return response.data;
+  },
+
+  async bulkCreate(inputs: unknown[], audit?: AuditContext): Promise<Record<string, unknown>> {
+    const response = await api.post<{ success: boolean; data: Record<string, unknown> }>("/api/admin/icons/bulk", { inputs, audit });
+    return response.data || {};
+  },
+
+  async uploadIcon(formData: FormData): Promise<AppIcon> {
+    const response = await api.upload<{
+      success: boolean;
+      data: AppIcon;
+      message?: string;
+    }>("/api/admin/icons/upload", formData, "POST");
+
+    if (!response.success || !response.data) {
+      throw new Error(response.message ?? "Failed to upload icon");
+    }
+
+    return response.data;
   },
 
   // ── UPDATE ────────────────────────────────────────────────────
 
-  async update(
+  async update(id: string, data: Record<string, unknown>, audit?: AuditContext): Promise<AppIcon> {
+    const response = await api.put<{
+      success: boolean;
+      data: AppIcon;
+    }>(`/api/admin/icons/${id}`, { ...data, audit });
+
+    if (!response.success || !response.data) {
+      throw new Error("Failed to update icon");
+    }
+
+    return response.data;
+  },
+
+  async updateMetadata(
     id: string,
-    input: UpdateIconInput,
-    audit: AuditContext
-  ): Promise<Icon> {
-    return prisma.$transaction(async (tx) => {
-      const existing = await tx.icon.findUniqueOrThrow({ where: { id } });
-
-      // Snapshot current state before overwriting
-      await snapshotVersion(tx, existing, audit, input.changeNote);
-
-      const icon = await tx.icon.update({
-        where: { id },
-        data: {
-          ...(input.displayName !== undefined ? { displayName: input.displayName } : {}),
-          ...(input.category    !== undefined ? { category:    input.category    } : {}),
-          ...(input.type        !== undefined ? { type:        input.type        } : {}),
-          ...(input.svgUrl      !== undefined ? { svgUrl:      input.svgUrl      } : {}),
-          ...(input.pngUrl      !== undefined ? { pngUrl:      input.pngUrl      } : {}),
-          ...(input.svgHash     !== undefined ? { svgHash:     input.svgHash     } : {}),
-          ...(input.pngHash     !== undefined ? { pngHash:     input.pngHash     } : {}),
-          ...(input.enabled     !== undefined ? { enabled:     input.enabled     } : {}),
-          version:   { increment: 1 },
-          updatedBy: audit.adminId,
-        },
-      });
-
-      await writeAudit(tx, {
-        iconId: icon.id,
-        action: "UPDATE",
-        audit,
-        metadata: { fields: Object.keys(input) },
-      });
-
-      await bumpCatalogVersion(tx);
-      return icon;
-    });
+    data: { displayName?: string; category?: string }
+  ): Promise<AppIcon> {
+    return IconRepository.update(id, data);
   },
 
-  // ── ENABLE / DISABLE ──────────────────────────────────────────
-
-  async setEnabled(id: string, enabled: boolean, audit: AuditContext): Promise<Icon> {
-    return prisma.$transaction(async (tx) => {
-      const icon = await tx.icon.update({
-        where: { id },
-        data: { enabled, updatedBy: audit.adminId, version: { increment: 1 } },
-      });
-
-      await writeAudit(tx, {
-        iconId: icon.id,
-        action: enabled ? "ENABLE" : "DISABLE",
-        audit,
-        metadata: { key: icon.key },
-      });
-
-      await bumpCatalogVersion(tx);
-      return icon;
-    });
+  async setEnabled(id: string, enabled: boolean, audit?: AuditContext): Promise<AppIcon> {
+    const response = await api.patch<{ success: boolean; data: AppIcon }>(
+      `/api/admin/icons/${id}/${enabled ? "enable" : "disable"}`,
+      { audit }
+    );
+    return response.data;
   },
 
-  // ── SOFT DELETE ───────────────────────────────────────────────
+  // ── DELETE / RESTORE ──────────────────────────────────────────
 
-  async softDelete(id: string, audit: AuditContext): Promise<Icon> {
-    return prisma.$transaction(async (tx) => {
-      const existing = await tx.icon.findUniqueOrThrow({ where: { id } });
+  async softDelete(id: string, audit?: AuditContext): Promise<AppIcon> {
+    const response = await api.delete<{
+      success: boolean;
+      data?: AppIcon;
+      message?: string;
+    }>(`/api/admin/icons/${id}`, { audit });
 
-      // Snapshot before deletion
-      await snapshotVersion(tx, existing, audit, "حذف الأيقونة");
-
-      const icon = await tx.icon.update({
-        where: { id },
-        data: {
-          deletedAt: new Date(),
-          enabled:   false,
-          updatedBy: audit.adminId,
-          version:   { increment: 1 },
-        },
-      });
-
-      await writeAudit(tx, {
-        iconId: icon.id,
-        action: "DELETE",
-        audit,
-        metadata: { key: icon.key },
-      });
-
-      await bumpCatalogVersion(tx);
-      return icon;
-    });
+    if (!response.success) {
+      throw new Error(response.message ?? "Failed to delete icon");
+    }
+    return response.data as AppIcon;
   },
 
-  // ── RESTORE (un-delete) ───────────────────────────────────────
-
-  async restore(id: string, audit: AuditContext): Promise<Icon> {
-    return prisma.$transaction(async (tx) => {
-      const icon = await tx.icon.update({
-        where: { id },
-        data: {
-          deletedAt: null,
-          enabled:   true,
-          updatedBy: audit.adminId,
-          version:   { increment: 1 },
-        },
-      });
-
-      await writeAudit(tx, {
-        iconId: icon.id,
-        action: "RESTORE",
-        audit,
-        metadata: { key: icon.key },
-      });
-
-      await bumpCatalogVersion(tx);
-      return icon;
-    });
+  async restore(id: string, audit?: AuditContext): Promise<AppIcon> {
+    const response = await api.post<{
+      success: boolean;
+      data: AppIcon;
+    }>(`/api/admin/icons/${id}/restore`, { audit });
+    return response.data;
   },
 
-  // ── ROLLBACK ──────────────────────────────────────────────────
+  async restoreToDefault(id: string): Promise<AppIcon> {
+    const response = await api.post<{
+      success: boolean;
+      data: AppIcon;
+      message?: string;
+    }>(`/api/admin/icons/restore/${id}`, {});
 
-  /**
-   * Revert an icon to a previous version snapshot.
-   * Current state is snapshotted first so the rollback itself is reversible.
-   */
-  async rollback(
-    iconId: string,
-    targetVersion: number,
-    audit: AuditContext
-  ): Promise<Icon> {
-    return prisma.$transaction(async (tx) => {
-      const [existing, snapshot] = await Promise.all([
-        tx.icon.findUniqueOrThrow({ where: { id: iconId } }),
-        tx.iconVersion.findFirst({
-          where: { iconId, version: targetVersion },
-        }),
-      ]);
-
-      if (!snapshot) {
-        throw new Error(`الإصدار ${targetVersion} غير موجود لهذه الأيقونة`);
-      }
-
-      // Snapshot current state before rollback
-      await snapshotVersion(tx, existing, audit, `rollback إلى v${targetVersion}`);
-
-      const icon = await tx.icon.update({
-        where: { id: iconId },
-        data: {
-          svgUrl:    snapshot.svgUrl,
-          pngUrl:    snapshot.pngUrl,
-          svgHash:   snapshot.svgHash,
-          pngHash:   snapshot.pngHash,
-          type:      snapshot.type,
-          version:   { increment: 1 },
-          updatedBy: audit.adminId,
-        },
-      });
-
-      await writeAudit(tx, {
-        iconId: icon.id,
-        action: "ROLLBACK",
-        audit,
-        metadata: {
-          key:           icon.key,
-          fromVersion:   existing.version,
-          toVersion:     targetVersion,
-        },
-      });
-
-      await bumpCatalogVersion(tx);
-      return icon;
-    });
-  },
-
-  // ── BULK CREATE ───────────────────────────────────────────────
-
-  async bulkCreate(
-    icons: CreateIconInput[],
-    audit: AuditContext
-  ): Promise<{ created: number; skipped: number; errors: string[] }> {
-    let created = 0;
-    let skipped = 0;
-    const errors: string[] = [];
-
-    for (const input of icons) {
-      try {
-        const existing = await prisma.icon.findUnique({ where: { key: input.key } });
-        if (existing) {
-          skipped++;
-          continue;
-        }
-        await IconRepository.create(input, audit);
-        created++;
-      } catch (e) {
-        errors.push(`${input.key}: ${(e as Error).message}`);
-      }
+    if (!response.success || !response.data) {
+      throw new Error(response.message ?? "Failed to restore icon");
     }
 
-    // One audit entry for the whole bulk operation (runs outside individual icon transactions — intentional,
-    // since each icon create already bumped the catalog version inside its own transaction)
-    await prisma.iconAuditLog.create({
-      data: {
-        iconId:     null,
-        action:     "BULK_UPLOAD",
-        adminId:    audit.adminId,
-        adminName:  audit.adminName,
-        adminEmail: audit.adminEmail,
-        ipAddress:  audit.ipAddress ?? null,
-        userAgent:  audit.userAgent ?? null,
-        metadata:   JSON.stringify({ total: icons.length, created, skipped, errors }),
-      },
-    });
-
-    return { created, skipped, errors };
+    return response.data;
   },
 
-  // ── CACHE INVALIDATION ────────────────────────────────────────
+  // ── PUBLISH / CACHE / ROLLBACK ────────────────────────────────
 
-  async invalidateCache(audit: AuditContext): Promise<{ etag: string; version: number }> {
-    return prisma.$transaction(async (tx) => {
-      await bumpCatalogVersion(tx);
+  async publishPending(iconIds?: string[]): Promise<{ published: number }> {
+    const response = await api.post<{
+      success: boolean;
+      data: { published: number };
+      message?: string;
+    }>("/api/admin/icons/publish", { iconIds });
 
-      await writeAudit(tx, {
-        action: "CACHE_CLEAR",
-        audit,
-        metadata: { triggeredAt: new Date().toISOString() },
-      });
-
-      const catalog = await tx.iconCatalogVersion.findUniqueOrThrow({
-        where: { id: "singleton" },
-      });
-
-      return { etag: catalog.etag, version: catalog.version };
-    });
-  },
-
-  // ── STATS ─────────────────────────────────────────────────────
-
-  /** Returns counts grouped by category for the dashboard summary panel */
-  async getCategoryStats(): Promise<{ category: string; total: number; enabled: number; withFile: number }[]> {
-    const icons = await prisma.icon.findMany({
-      where:  { deletedAt: null },
-      select: { category: true, enabled: true, svgUrl: true, pngUrl: true },
-    });
-
-    const map = new Map<string, { total: number; enabled: number; withFile: number }>();
-    for (const icon of icons) {
-      const cur = map.get(icon.category) ?? { total: 0, enabled: 0, withFile: 0 };
-      cur.total++;
-      if (icon.enabled) cur.enabled++;
-      if (icon.svgUrl || icon.pngUrl) cur.withFile++;
-      map.set(icon.category, cur);
+    if (!response.success || !response.data) {
+      throw new Error(response.message ?? "Failed to publish icons");
     }
-    return Array.from(map.entries()).map(([category, stats]) => ({ category, ...stats }));
+
+    return response.data;
+  },
+
+  async invalidateCache(audit?: AuditContext): Promise<Record<string, unknown>> {
+    const response = await api.post<{ success: boolean; data?: Record<string, unknown> }>("/api/admin/icons/cache-invalidate", { audit });
+    return response.data || { success: response.success };
+  },
+
+  async rollback(iconId: string, versionIdOrTarget: string | number, audit?: AuditContext): Promise<AppIcon> {
+    const response = await api.post<{
+      success: boolean;
+      data: AppIcon;
+      message?: string;
+    }>(`/api/admin/icons/revert/${iconId}`, { versionId: versionIdOrTarget, targetVersion: versionIdOrTarget, audit });
+
+    if (!response.success || !response.data) {
+      throw new Error(response.message ?? "Failed to rollback icon");
+    }
+
+    return response.data;
   },
 };

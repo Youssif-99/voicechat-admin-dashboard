@@ -25,8 +25,12 @@ export async function createBanner(formData: FormData) {
 
 export async function updateBanner(formData: FormData) {
   await requireRole("ADMIN");
-  const id = String(formData.get("id"));
-  // TODO: implement edit UI if needed
+  const id      = String(formData.get("id")      || "");
+  const title   = String(formData.get("title")   || "").trim() || undefined;
+  const linkUrl = String(formData.get("linkUrl") || "").trim() || undefined;
+  const screen  = String(formData.get("screen")  || "").trim() || undefined;
+  if (!id) return;
+  await bannersApi.update(id, { title, linkUrl, screen });
   revalidatePath("/banners");
 }
 

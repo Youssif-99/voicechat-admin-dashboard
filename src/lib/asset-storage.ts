@@ -20,16 +20,21 @@ import fs from "fs/promises";
 
 // ── Constants ──────────────────────────────────────────────────────────────
 
-export const ASSET_MAX_BYTES = 5 * 1024 * 1024;      // 5 MB for raster images
-export const ASSET_MAX_SVG_BYTES = 512 * 1024;        // 512 KB for SVG
-export const THUMBNAIL_SIZE = 128;                     // px
-export const THUMBNAIL_QUALITY = 80;                   // JPEG/WEBP quality
+/** حد موحّد لجميع أنواع الأصول = 10 MB */
+export const ASSET_MAX_BYTES     = 10 * 1024 * 1024;  // 10 MB
+export const ASSET_MAX_SVG_BYTES = 10 * 1024 * 1024;  // 10 MB (موحّد مع بقية الأنواع)
+export const THUMBNAIL_SIZE      = 128;                // px
+export const THUMBNAIL_QUALITY   = 80;                 // JPEG/WEBP quality
 
 export const ALLOWED_ASSET_MIMES = [
   "image/svg+xml",
   "image/png",
   "image/webp",
   "image/jpeg",
+  "image/x-icon",
+  "image/gif",
+  "application/json",
+  "application/octet-stream",
 ] as const;
 
 export type AllowedAssetMime = (typeof ALLOWED_ASSET_MIMES)[number];
@@ -49,6 +54,8 @@ export type AssetUploadResult = {
 // ── MIME detection from magic bytes ───────────────────────────────────────
 
 export function detectAssetMime(buffer: Buffer): AllowedAssetMime | null {
+  if (!buffer || buffer.length === 0) return null;
+
   // PNG: 89 50 4E 47 0D 0A 1A 0A
   if (buffer[0] === 0x89 && buffer[1] === 0x50 && buffer[2] === 0x4e && buffer[3] === 0x47) {
     return "image/png";
@@ -57,12 +64,27 @@ export function detectAssetMime(buffer: Buffer): AllowedAssetMime | null {
   if (buffer[0] === 0xff && buffer[1] === 0xd8 && buffer[2] === 0xff) {
     return "image/jpeg";
   }
+  // GIF: GIF87a (47 49 46 38 37 61) / GIF89a (47 49 46 38 39 61)
+  if (buffer[0] === 0x47 && buffer[1] === 0x49 && buffer[2] === 0x46 && buffer[3] === 0x38) {
+    return "image/gif";
+  }
+  // Rive (.riv): RIVE (52 49 56 45)
+  if (buffer[0] === 0x52 && buffer[1] === 0x49 && buffer[2] === 0x56 && buffer[3] === 0x45) {
+    return "application/octet-stream";
+  }
   // WEBP: RIFF????WEBP
   if (
     buffer[0] === 0x52 && buffer[1] === 0x49 && buffer[2] === 0x46 && buffer[3] === 0x46 &&
     buffer[8] === 0x57 && buffer[9] === 0x45 && buffer[10] === 0x42 && buffer[11] === 0x50
   ) {
     return "image/webp";
+  }
+  // ICO: 00 00 01 00
+  if (
+    buffer[0] === 0x00 && buffer[1] === 0x00 &&
+    buffer[2] === 0x01 && buffer[3] === 0x00
+  ) {
+    return "image/x-icon";
   }
   // SVG: starts with optional BOM/whitespace then '<'
   const text = buffer.slice(0, 512).toString("utf-8").trimStart();
@@ -74,6 +96,15 @@ export function detectAssetMime(buffer: Buffer): AllowedAssetMime | null {
     const after = buffer.slice(3, 515).toString("utf-8").trimStart();
     if (after.startsWith("<?xml") || after.startsWith("<svg")) return "image/svg+xml";
   }
+  // JSON / Lottie: Starts with '{' or '[' (ignoring BOM/whitespace)
+  if (text.startsWith("{") || text.startsWith("[")) {
+    try {
+      JSON.parse(buffer.toString("utf-8"));
+      return "application/json";
+    } catch {
+      // not valid JSON
+    }
+  }
   return null;
 }
 
@@ -81,10 +112,14 @@ export function detectAssetMime(buffer: Buffer): AllowedAssetMime | null {
 
 export function mimeToExt(mime: AllowedAssetMime): string {
   const map: Record<AllowedAssetMime, string> = {
-    "image/svg+xml": "svg",
-    "image/png":     "png",
-    "image/webp":    "webp",
-    "image/jpeg":    "jpg",
+    "image/svg+xml":          "svg",
+    "image/png":              "png",
+    "image/webp":             "webp",
+    "image/jpeg":             "jpg",
+    "image/x-icon":           "ico",
+    "image/gif":              "gif",
+    "application/json":       "json",
+    "application/octet-stream": "riv",
   };
   return map[mime];
 }
@@ -130,10 +165,11 @@ async function processRasterImage(
   mime: AllowedAssetMime
 ): Promise<ImageMeta> {
   try {
-    // Dynamic import — sharp is optional. Install: npm install sharp @types/sharp
-    // eslint-disable-next-line @typescript-eslint/no-explicit-any
-    const sharpMod = await import("sharp" as string) as any;
-    const sharpFn  = sharpMod.default ?? sharpMod;
+    // sharp is a native addon listed in package.json and marked as a webpack
+    // external in next.config.mjs. Use require() at runtime — never import()
+    // at module level — so the build never fails when sharp is absent.
+    // eslint-disable-next-line @typescript-eslint/no-require-imports, @typescript-eslint/no-explicit-any
+    const sharpFn = (require("sharp") as any).default ?? require("sharp");
     const img  = sharpFn(buffer);
     const meta = await img.metadata();
 
@@ -154,7 +190,7 @@ async function processRasterImage(
       buffer: optimized,
     };
   } catch {
-    // sharp not installed — return buffer unchanged, zero dimensions
+    // sharp not available — return buffer unchanged, zero dimensions
     return { width: 0, height: 0, buffer };
   }
 }
@@ -163,11 +199,10 @@ async function generateThumbnail(
   buffer: Buffer,
   mime: AllowedAssetMime
 ): Promise<Buffer> {
-  if (mime === "image/svg+xml") return buffer;
+  if (mime === "image/svg+xml" || mime === "application/json" || mime === "application/octet-stream") return buffer;
   try {
-    // eslint-disable-next-line @typescript-eslint/no-explicit-any
-    const sharpMod = await import("sharp" as string) as any;
-    const sharpFn  = sharpMod.default ?? sharpMod;
+    // eslint-disable-next-line @typescript-eslint/no-require-imports, @typescript-eslint/no-explicit-any
+    const sharpFn = (require("sharp") as any).default ?? require("sharp");
     return await sharpFn(buffer)
       .resize(THUMBNAIL_SIZE, THUMBNAIL_SIZE, { fit: "inside", withoutEnlargement: true })
       .webp({ quality: THUMBNAIL_QUALITY })
@@ -192,7 +227,7 @@ async function uploadLocalAsset(buffer: Buffer, filename: string): Promise<strin
   if (!dest.startsWith(LOCAL_ASSETS_DIR + path.sep) && dest !== LOCAL_ASSETS_DIR) {
     throw new Error("Path traversal detected");
   }
-  await fs.writeFile(dest, buffer);
+  await fs.writeFile(dest, buffer); 
   return `${LOCAL_BASE_URL}/assets/${filename}`;
 }
 
@@ -244,7 +279,7 @@ async function uploadS3Asset(
     Bucket: bucket,
     Key: key,
     Body: buffer,
-    ContentType: mime,
+    ContentType: mime === "image/x-icon" ? "image/x-icon" : mime,
     CacheControl: "public, max-age=31536000, immutable",
     ACL: process.env.AWS_S3_PUBLIC === "true" ? "public-read" : undefined,
   }));
@@ -330,15 +365,14 @@ export async function uploadAsset(
   const mime = detectAssetMime(buffer);
   if (!mime) {
     throw new Error(
-      "نوع الملف غير مدعوم. الأنواع المقبولة: SVG, PNG, WEBP, JPG/JPEG."
+      "نوع الملف غير مدعوم. الأنواع المقبولة: Lottie (.json), Rive (.riv), SVG, PNG, WEBP, GIF, JPG/JPEG."
     );
   }
 
-  // 2. Size limits
-  const maxBytes = mime === "image/svg+xml" ? ASSET_MAX_SVG_BYTES : ASSET_MAX_BYTES;
-  if (buffer.length > maxBytes) {
+  // 2. Size limits — موحّد 10 MB لجميع الأنواع
+  if (buffer.length > ASSET_MAX_BYTES) {
     throw new Error(
-      `حجم الملف (${(buffer.length / 1024 / 1024).toFixed(2)} MB) يتجاوز الحد المسموح (${maxBytes / 1024 / 1024} MB).`
+      `حجم الملف (${(buffer.length / 1024 / 1024).toFixed(2)} MB) يتجاوز الحد المسموح (${ASSET_MAX_BYTES / 1024 / 1024} MB).`
     );
   }
 
@@ -351,6 +385,8 @@ export async function uploadAsset(
   if (mime === "image/svg+xml") {
     const sanitized = sanitizeAssetSvg(buffer.toString("utf-8"));
     finalBuffer = Buffer.from(sanitized, "utf-8");
+  } else if (mime === "application/json" || mime === "application/octet-stream") {
+    finalBuffer = buffer;
   } else {
     const processed = await processRasterImage(buffer, mime);
     finalBuffer = processed.buffer;
@@ -360,7 +396,7 @@ export async function uploadAsset(
 
   // 4. Thumbnail
   const thumbBuffer = await generateThumbnail(finalBuffer, mime);
-  const thumbExt    = mime === "image/svg+xml" ? "svg" : "webp";
+  const thumbExt    = mime === "image/svg+xml" ? "svg" : (mime === "application/json" ? "json" : (mime === "application/octet-stream" ? "riv" : "webp"));
 
   // 5. Hash
   const hash = hashAssetBuffer(finalBuffer);

@@ -1,4 +1,4 @@
-// File: E:\voice-admin-dashboard\src\app\api\admin\icons\route.ts
+// File: E:\voicechat\voice-admin-dashboard\src\app\api\admin\icons\route.ts
 import * as entry from '../../../../../../src/app/api/admin/icons/route.js'
 import type { NextRequest } from 'next/server.js'
 

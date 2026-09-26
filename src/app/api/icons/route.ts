@@ -66,7 +66,7 @@ export async function GET(req: NextRequest) {
         svgHash:     icon.svgHash,
         pngHash:     icon.pngHash,
         version:     icon.version,
-        updatedAt:   icon.updatedAt.toISOString(),
+        updatedAt:   typeof icon.updatedAt === "string" ? icon.updatedAt : new Date(icon.updatedAt).toISOString(),
       })),
     };
 
@@ -79,6 +79,7 @@ export async function GET(req: NextRequest) {
         "X-RateLimit-Remaining":        String(result.remaining),
         "Access-Control-Allow-Origin":  "*",
         "Access-Control-Allow-Methods": "GET, OPTIONS",
+        "Access-Control-Allow-Headers": "Content-Type, If-None-Match, Accept, Authorization",
       },
     });
   } catch (err) {
@@ -93,7 +94,8 @@ export async function OPTIONS() {
     headers: {
       "Access-Control-Allow-Origin":  "*",
       "Access-Control-Allow-Methods": "GET, OPTIONS",
-      "Access-Control-Allow-Headers": "If-None-Match, Accept",
+      "Access-Control-Allow-Headers": "Content-Type, If-None-Match, Accept, Authorization",
+      "Access-Control-Max-Age":       "86400", // Cache preflight for 24 hours
     },
   });
 }

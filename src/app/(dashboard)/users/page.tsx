@@ -10,11 +10,15 @@ import type { AdminRole } from "@/lib/auth";
 export const dynamic = "force-dynamic";
 
 const BAN_LABELS: Record<string, string> = {
-  DAY_1:     "يوم واحد",
-  DAY_3:     "3 أيام",
-  WEEK_1:    "أسبوع",
-  PERMANENT: "دائم",
-  NETWORK:   "حظر شبكة",
+  // Dashboard-side keys (sent to UI from normaliser)
+  DAY_1:      "يوم واحد",
+  DAY_3:      "3 أيام",
+  WEEK_1:     "أسبوع",
+  PERMANENT:  "دائم",
+  NETWORK:    "حظر شبكة",
+  // Backend keys (passthrough before normalisation)
+  ONE_DAY:    "يوم واحد",
+  THREE_DAYS: "3 أيام",
 };
 
 export default async function UsersPage({

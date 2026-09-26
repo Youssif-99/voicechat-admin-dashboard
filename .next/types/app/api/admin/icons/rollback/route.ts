@@ -1,4 +1,4 @@
-// File: E:\voice-admin-dashboard\src\app\api\admin\icons\rollback\route.ts
+// File: E:\voicechat\voice-admin-dashboard\src\app\api\admin\icons\rollback\route.ts
 import * as entry from '../../../../../../../src/app/api/admin/icons/rollback/route.js'
 import type { NextRequest } from 'next/server.js'
 

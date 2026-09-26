@@ -1,0 +1,63 @@
+# Dependencies
+node_modules
+npm-debug.log*
+yarn-debug.log*
+yarn-error.log*
+
+# Build output
+.next/
+out/
+build/
+dist/
+
+# Testing
+coverage/
+.nyc_output
+
+# Environment
+.env
+.env.local
+.env.*.local
+
+# IDE
+.vscode/
+.idea/
+*.swp
+*.swo
+*~
+
+# OS
+.DS_Store
+Thumbs.db
+
+# Git
+.git/
+.gitignore
+
+# Documentation
+README.md
+*.md
+
+# Test scripts
+*.test.ts
+*.test.js
+tests/
+__tests__/
+test-*.js
+test-*.ps1
+check-*.js
+fix-*.js
+debug-*.js
+add-*.js
+restore-*.js
+
+# Prisma seed scripts (not needed in production)
+prisma/seed.ts
+prisma/seed-icons.ts
+
+# Unused asset management pages (causing build errors)
+**/assets/**
+
+# Misc
+.eslintrc.json
+tsconfig.tsbuildinfo

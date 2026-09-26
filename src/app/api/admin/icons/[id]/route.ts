@@ -87,19 +87,25 @@ export async function PUT(req: NextRequest, { params }: Params) {
     // Replace SVG — delete old file first
     if (svgFile && svgFile.size > 0) {
       if (existing.svgUrl) await deleteIcon(existing.svgUrl);
-      const buf = Buffer.from(await svgFile.arrayBuffer());
+      const buf    = Buffer.from(await svgFile.arrayBuffer());
       const result = await uploadIcon(buf, svgFile.name);
-      svgUrl  = result.url;
-      svgHash = result.hash;
+      if (!result.success) {
+        return NextResponse.json({ error: result.error }, { status: 422 });
+      }
+      svgUrl  = result.data.url;
+      svgHash = result.data.hash;
     }
 
     // Replace PNG
     if (pngFile && pngFile.size > 0) {
       if (existing.pngUrl) await deleteIcon(existing.pngUrl);
-      const buf = Buffer.from(await pngFile.arrayBuffer());
+      const buf    = Buffer.from(await pngFile.arrayBuffer());
       const result = await uploadIcon(buf, pngFile.name);
-      pngUrl  = result.url;
-      pngHash = result.hash;
+      if (!result.success) {
+        return NextResponse.json({ error: result.error }, { status: 422 });
+      }
+      pngUrl  = result.data.url;
+      pngHash = result.data.hash;
     }
 
     const icon = await IconRepository.update(

@@ -1,7 +1,7 @@
 "use server";
 
 import { redirect } from "next/navigation";
-import { destroySession, getSession } from "@/lib/auth";
+import { destroySession } from "@/lib/auth-mutations";
 import { authApi } from "@/lib/api-client";
 
 export async function logoutAction() {

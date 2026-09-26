@@ -12,12 +12,19 @@
  *   const users = await api.get<UsersResponse>("/admin/users");
  */
 
-import { getSession, refreshAccessToken, destroySession } from "./auth";
+/**
+ * api-client.ts imports ONLY from auth.ts (read-only).
+ * Cookie mutations (createSession / destroySession / refresh) live in
+ * auth-mutations.ts and are called exclusively from Server Actions or
+ * Route Handlers — never from the fetch pipeline which runs during
+ * Server Component rendering where cookies().set() is forbidden.
+ */
+import { getSession } from "./auth";
 
 // ── Config ─────────────────────────────────────────────────────────────────
 
 export const EXPRESS_API_URL = (
-  process.env.EXPRESS_API_URL || "http://localhost:4000"
+  process.env.EXPRESS_API_URL || "http://localhost:3000"
 ).replace(/\/$/, "");
 
 // ── Error type ─────────────────────────────────────────────────────────────
@@ -52,10 +59,19 @@ type FetchOptions = Omit<RequestInit, "body"> & {
 
 async function fetchExpress<T>(
   path: string,
-  options: FetchOptions = {},
-  retried = false
+  options: FetchOptions = {}
 ): Promise<T> {
   const session = await getSession();
+  
+  // Debug logging
+  if (process.env.NODE_ENV !== 'production') {
+    console.log('[api-client] fetchExpress:', { 
+      path, 
+      hasSession: !!session, 
+      hasToken: !!session?.accessToken,
+      tokenPreview: session?.accessToken ? `${session.accessToken.substring(0, 30)}...` : 'NONE'
+    });
+  }
 
   // Build URL with query params
   const url = new URL(`${EXPRESS_API_URL}${path}`);
@@ -67,6 +83,10 @@ async function fetchExpress<T>(
     }
   }
 
+  if (process.env.NODE_ENV !== 'production') {
+    console.log('[api-client] Final URL:', url.toString());
+  }
+
   // Build headers
   const headers: Record<string, string> = {
     "Content-Type": "application/json",
@@ -76,6 +96,13 @@ async function fetchExpress<T>(
 
   if (session?.accessToken) {
     headers["Authorization"] = `Bearer ${session.accessToken}`;
+    if (process.env.NODE_ENV !== 'production') {
+      console.log('[api-client] Authorization header set');
+    }
+  } else {
+    if (process.env.NODE_ENV !== 'production') {
+      console.log('[api-client] ⚠️ NO SESSION OR TOKEN - Request will fail!');
+    }
   }
 
   const init: RequestInit = {
@@ -86,16 +113,31 @@ async function fetchExpress<T>(
     cache: "no-store",
   };
 
-  const res = await fetch(url.toString(), init);
+  let res: Response;
+  try {
+    res = await fetch(url.toString(), init);
+  } catch (err) {
+    // Network error (ECONNREFUSED, timeout, DNS failure, etc.)
+    // Wrap in ApiError with status 0 so every caller gets a typed error.
+    const msg = (err instanceof Error ? err.message : String(err)) || "fetch failed";
+    throw new ApiError(0, `تعذّر الاتصال بـ ${EXPRESS_API_URL} — ${msg}`);
+  }
 
-  // Transparent token refresh on 401
-  if (res.status === 401 && !retried && session?.refreshToken) {
-    const newAccessToken = await refreshAccessToken(session.refreshToken);
-    if (newAccessToken) {
-      return fetchExpress<T>(path, options, true);
+  if (process.env.NODE_ENV !== 'production') {
+    console.log('[api-client] Response status:', res.status);
+  }
+
+  // ── 401 handling ────────────────────────────────────────────────────────
+  // fetchExpress runs during Server Component rendering where cookies().set()
+  // is forbidden. Token rotation happens in the /api/admin/session Route Handler
+  // (called by middleware) before the page renders. If the token is still
+  // expired here, throw a typed ApiError — the page renders the "session expired"
+  // message with a login link. No crash, no cookie mutation.
+  if (res.status === 401) {
+    if (process.env.NODE_ENV !== 'production') {
+      const errorBody = await res.text().catch(() => 'Could not read error body');
+      console.log('[api-client] ❌ 401 Unauthorized. Backend response:', errorBody);
     }
-    // Refresh failed — session is dead
-    await destroySession();
     throw new ApiError(401, "انتهت الجلسة، يرجى تسجيل الدخول مرة أخرى");
   }
 
@@ -224,8 +266,11 @@ export type AdminRecord = {
 };
 
 export const adminsApi = {
-  list: () =>
-    api.get<AdminRecord[]>("/api/admin/admins"),
+  list: async (): Promise<AdminRecord[]> => {
+    const raw = await api.get<unknown>("/api/admin/admins");
+    const envelope = raw as { success?: boolean; data?: AdminRecord[] };
+    return Array.isArray(envelope?.data) ? envelope.data : Array.isArray(raw) ? raw as AdminRecord[] : [];
+  },
 
   create: (data: { name: string; email: string; password: string; role: AdminRole }) =>
     api.post<AdminRecord>("/api/admin/admins", data),
@@ -243,40 +288,147 @@ export const adminsApi = {
 // ──────────────────────────────────────
 //  USERS
 // ──────────────────────────────────────
+
+/**
+ * UserRecord — normalised shape used throughout the dashboard.
+ * Backend returns slightly different field names; see normaliseUser() below.
+ *
+ * Backend user fields (from GET /api/admin/users):
+ *   id, username, displayName, email, phone, avatar (not avatarUrl),
+ *   role, status, isBanned, banType, banExpiresAt, accountType,
+ *   agencyApproved, coins, vipTier (string "NONE"|"VIP"|"SVIP_1"...), createdAt
+ */
 export type UserRecord = {
-  id: string;
-  username: string;
-  displayName: string;
-  avatarUrl?: string;
-  phone?: string;
-  email?: string;
-  coins: number;
-  vipLevel: number;
-  svipLevel?: number;
-  isAgent: boolean;
-  isHost: boolean;
-  status: "ACTIVE" | "BANNED" | "SUSPENDED";
-  banType?: string;
-  banReason?: string;
-  banExpiresAt?: string;
-  createdAt: string;
-  agencyId?: string;
-  agency?: { id: string; name: string };
+  id:           string;
+  username:     string;
+  displayName:  string;
+  avatarUrl?:   string;
+  phone?:       string;
+  email?:       string;
+  coins:        number;
+  vipLevel:     number;   // derived from vipTier
+  vipTier?:     string;   // raw string from backend
+  svipLevel?:   number;
+  isAgent:      boolean;
+  isHost:       boolean;
+  status:       "ACTIVE" | "BANNED" | "SUSPENDED";
+  banType?:     string;
+  banReason?:   string;
+  banExpiresAt?:string;
+  createdAt:    string;
+  agencyId?:    string;
+  agency?:      { id: string; name: string };
 };
 
+/** Map VipTier string → numeric level (0 = no VIP) */
+function vipTierToLevel(tier: string | null | undefined): number {
+  if (!tier || tier === "NONE") return 0;
+  if (tier === "VIP")           return 1;
+  // SVIP_1 → 2, SVIP_2 → 3 ... SVIP_5 → 6, TEST_VIP → 1, TEST_SVIP → 2
+  const svip = tier.match(/SVIP_(\d)/);
+  if (svip) return 1 + parseInt(svip[1], 10);
+  if (tier.includes("TEST")) return 1;
+  return 1;
+}
+
+/**
+ * Map dashboard banType → backend banType
+ * Dashboard UI sends: DAY_1, DAY_3, WEEK_1, PERMANENT, NETWORK
+ * Backend expects:    ONE_DAY, THREE_DAYS, NETWORK
+ * PERMANENT and WEEK_1 → ONE_DAY (backend longest non-network ban is ONE_DAY/THREE_DAYS)
+ * We use NETWORK for PERMANENT as it's the closest "indefinite" equivalent.
+ */
+function mapBanType(dashboardBanType: string): string {
+  const map: Record<string, string> = {
+    DAY_1:     "ONE_DAY",
+    DAY_3:     "THREE_DAYS",
+    WEEK_1:    "THREE_DAYS",   // no WEEK_1 on backend — use THREE_DAYS
+    PERMANENT: "NETWORK",      // NETWORK = permanent network-level ban
+    NETWORK:   "NETWORK",
+    // passthrough if backend values are already sent
+    ONE_DAY:    "ONE_DAY",
+    THREE_DAYS: "THREE_DAYS",
+  };
+  return map[dashboardBanType] ?? "ONE_DAY";
+}
+
+/**
+ * Map backend banType → dashboard display key
+ */
+function mapBanTypeFromBackend(backendBanType: string | undefined): string | undefined {
+  if (!backendBanType) return undefined;
+  const map: Record<string, string> = {
+    ONE_DAY:    "DAY_1",
+    THREE_DAYS: "DAY_3",
+    NETWORK:    "NETWORK",
+  };
+  return map[backendBanType] ?? backendBanType;
+}
+
+function normaliseUser(raw: Record<string, unknown>): UserRecord {
+  return {
+    id:          String(raw.id          ?? ""),
+    username:    String(raw.username    ?? ""),
+    displayName: String(raw.displayName ?? raw.username ?? ""),
+    avatarUrl:   (raw.avatarUrl ?? raw.avatar) as string | undefined,
+    phone:       raw.phone   as string | undefined,
+    email:       raw.email   as string | undefined,
+    coins:       Number(raw.coins ?? 0),
+    vipLevel:    vipTierToLevel(raw.vipTier as string),
+    vipTier:     raw.vipTier as string | undefined,
+    svipLevel:   raw.svipLevel as number | undefined,
+    isAgent:     !!(raw.isAgent ?? (raw.role === "AGENT")),
+    isHost:      !!(raw.isHost  ?? (raw.role === "HOST")),
+    status:      (raw.status ?? "ACTIVE") as UserRecord["status"],
+    banType:     mapBanTypeFromBackend(raw.banType as string | undefined),
+    banReason:   raw.banReason as string | undefined,
+    banExpiresAt:raw.banExpiresAt as string | undefined,
+    createdAt:   String(raw.createdAt ?? ""),
+    agencyId:    raw.agencyId as string | undefined,
+    agency:      raw.agency as { id: string; name: string } | undefined,
+  };
+}
+
+type RawPaginatedEnvelope<T> = {
+  success?: boolean;
+  data:     T[];
+  total:    number;
+  page:     number;
+  pageSize: number;
+  pages:    number;
+};
+
+function normalisePaginated<T>(
+  raw: unknown,
+  itemNormaliser?: (item: Record<string, unknown>) => T
+): PaginatedResponse<T> {
+  const r = raw as RawPaginatedEnvelope<Record<string, unknown>>;
+  const items = Array.isArray(r.data) ? r.data : [];
+  return {
+    data:     itemNormaliser ? items.map(itemNormaliser) : items as unknown as T[],
+    total:    Number(r.total    ?? 0),
+    page:     Number(r.page     ?? 1),
+    pageSize: Number(r.pageSize ?? 50),
+    pages:    Number(r.pages    ?? 1),
+  };
+}
+
 export const usersApi = {
-  list: (params?: {
-    q?: string;
-    status?: string;
-    page?: number;
-    pageSize?: number;
-  }) => api.get<PaginatedResponse<UserRecord>>("/api/admin/users", params),
+  list: async (params?: {
+    q?: string; status?: string; page?: number; pageSize?: number;
+  }): Promise<PaginatedResponse<UserRecord>> => {
+    const raw = await api.get<unknown>("/api/admin/users", params);
+    return normalisePaginated(raw, normaliseUser as (item: Record<string, unknown>) => UserRecord);
+  },
 
   get: (id: string) =>
     api.get<UserRecord>(`/api/admin/users/${id}`),
 
   ban: (id: string, data: { banType: string; banReason?: string }) =>
-    api.patch<UserRecord>(`/api/admin/users/${id}/ban`, data),
+    api.patch<UserRecord>(`/api/admin/users/${id}/ban`, {
+      ...data,
+      banType: mapBanType(data.banType),
+    }),
 
   unban: (id: string) =>
     api.patch<UserRecord>(`/api/admin/users/${id}/unban`),
@@ -307,12 +459,50 @@ export type RoomRecord = {
   activeUsers?: number;
 };
 
-export const roomsApi = {
-  list: (params?: { q?: string; status?: string; page?: number; pageSize?: number }) =>
-    api.get<PaginatedResponse<RoomRecord>>("/api/admin/rooms", params),
+/**
+ * Backend returns:
+ *   { id, name, image, isPrivate, isActive, maxSeats, ownerId, owner, activeUsers, createdAt }
+ *
+ * Dashboard expects:
+ *   { id, name, coverUrl, type, seatsLimit, status, ownerId, owner, activeUsers, createdAt }
+ */
+function normaliseRoom(raw: Record<string, unknown>): RoomRecord {
+  const owner = (raw.owner ?? {}) as Record<string, unknown>;
+  return {
+    id:          String(raw.id          ?? ""),
+    name:        String(raw.name        ?? ""),
+    coverUrl:    (raw.coverUrl ?? raw.image) as string | undefined,
+    seatsLimit:  Number(raw.seatsLimit  ?? raw.maxSeats ?? 0),
+    type:        raw.isPrivate ? "PRIVATE" : "PUBLIC",
+    // isActive:false means closed/banned; isActive:true means active
+    status:      raw.isActive === false ? "BANNED" : "ACTIVE",
+    createdAt:   String(raw.createdAt   ?? ""),
+    ownerId:     String(raw.ownerId     ?? ""),
+    owner: {
+      id:          String(owner.id          ?? ""),
+      username:    String(owner.username    ?? ""),
+      displayName: String(owner.displayName ?? owner.username ?? ""),
+    },
+    activeUsers: raw.activeUsers as number | undefined,
+  };
+}
 
-  get: (id: string) =>
-    api.get<RoomRecord>(`/api/admin/rooms/${id}`),
+export const roomsApi = {
+  list: async (params?: { q?: string; status?: string; page?: number; pageSize?: number }): Promise<PaginatedResponse<RoomRecord>> => {
+    // Backend uses isActive filter — map status param
+    const backendParams: Record<string, string | number | boolean | undefined | null> = { ...params };
+    if (params?.status === "ACTIVE")  backendParams.status = "ACTIVE";
+    if (params?.status === "BANNED")  { backendParams.status = "CLOSED"; }
+    const raw = await api.get<unknown>("/api/admin/rooms", backendParams);
+    return normalisePaginated(raw, normaliseRoom as (item: Record<string, unknown>) => RoomRecord);
+  },
+
+  get: async (id: string): Promise<RoomRecord> => {
+    const raw = await api.get<unknown>(`/api/admin/rooms/${id}`);
+    const envelope = raw as { success?: boolean; data?: Record<string, unknown> };
+    const data = envelope?.data ?? (raw as Record<string, unknown>);
+    return normaliseRoom(data as Record<string, unknown>);
+  },
 
   ban: (id: string, reason?: string) =>
     api.patch<RoomRecord>(`/api/admin/rooms/${id}/ban`, { reason }),
@@ -320,8 +510,13 @@ export const roomsApi = {
   unban: (id: string) =>
     api.patch<RoomRecord>(`/api/admin/rooms/${id}/unban`),
 
-  update: (id: string, data: Partial<{ name: string; coverUrl: string }>) =>
-    api.patch<RoomRecord>(`/api/admin/rooms/${id}`, data),
+  update: (id: string, data: Partial<{ name: string; coverUrl: string }>) => {
+    // Backend field for cover image is 'image', not 'coverUrl'
+    const payload: Record<string, unknown> = {};
+    if (data.name     !== undefined) payload.name  = data.name;
+    if (data.coverUrl !== undefined) payload.image = data.coverUrl;
+    return api.patch<RoomRecord>(`/api/admin/rooms/${id}`, payload);
+  },
 
   delete: (id: string) =>
     api.delete<void>(`/api/admin/rooms/${id}`),
@@ -349,12 +544,69 @@ export type AgencyRecord = {
   hostsCount?: number;
 };
 
-export const agenciesApi = {
-  list: (params?: { status?: string; page?: number; pageSize?: number }) =>
-    api.get<PaginatedResponse<AgencyRecord>>("/api/admin/agencies", params),
+/**
+ * Backend /api/admin/agencies now returns AgencyRequest records transformed for compatibility:
+ *   { id, name (from agencyName), ownerName, phone, email, country, documents,
+ *     profileImage, bio, teamSize, offeredServices, status(PENDING|APPROVED|REJECTED),
+ *     rejectionReason, reviewedAt, createdAt, hostsCount, level, commissionRate, totalEarnings,
+ *     userId, user: { id, username, email, phone, accountType, agencyApproved, status } }
+ *
+ * Dashboard expects: id, name, ownerName, phone, email, status, level,
+ *   commissionRate, totalEarnings, hostsCount, createdAt
+ */
+function normaliseAgencyStatus(raw: Record<string, unknown>): AgencyRecord["status"] {
+  const s = String(raw.status ?? "");
+  // AgencyRequest.status values
+  if (s === "PENDING")   return "PENDING";
+  if (s === "APPROVED")  return "APPROVED";
+  if (s === "REJECTED")  return "REJECTED";
+  if (s === "SUSPENDED") return "SUSPENDED";
+  if (s === "BANNED")    return "BANNED";
+  // Fallback for old User-based approach
+  if (s === "PENDING_APPROVAL") return "PENDING";
+  if (s === "ACTIVE" && raw.agencyApproved === true) return "APPROVED";
+  return "PENDING";
+}
 
-  get: (id: string) =>
-    api.get<AgencyRecord>(`/api/admin/agencies/${id}`),
+function normaliseAgency(raw: Record<string, unknown>): AgencyRecord {
+  return {
+    id:             String(raw.id          ?? ""),
+    // New: name comes from transformed AgencyRequest.agencyName
+    name:           String(raw.name ?? raw.agencyName ?? raw.displayName ?? ""),
+    // New: ownerName comes directly from AgencyRequest.ownerName
+    ownerName:      String(raw.ownerName ?? raw.displayName ?? raw.username ?? ""),
+    phone:          String(raw.phone       ?? ""),
+    email:          raw.email as string | undefined,
+    status:         normaliseAgencyStatus(raw),
+    // level and commissionRate come from transformed response
+    level:          String(raw.level ?? "عادي"),
+    commissionRate: Number(raw.commissionRate ?? 0),
+    totalEarnings:  Number(raw.totalEarnings  ?? 0),
+    notes:          (raw.notes ?? raw.rejectionReason) as string | undefined,
+    createdAt:      String(raw.createdAt  ?? ""),
+    reviewedAt:     (raw.reviewedAt ?? raw.agencyApprovedAt) as string | undefined,
+    hostsCount:     Number(raw.hostsCount ?? 0),
+  };
+}
+
+export const agenciesApi = {
+  list: async (params?: { status?: string; page?: number; pageSize?: number }): Promise<PaginatedResponse<AgencyRecord>> => {
+    // New AgencyRequest-based API uses direct status values (no mapping needed)
+    const backendParams: Record<string, string | number | boolean | undefined | null> = {
+      page:     params?.page,
+      pageSize: params?.pageSize,
+      status:   params?.status, // Pass status directly — backend expects PENDING, APPROVED, REJECTED, etc.
+    };
+    const raw = await api.get<unknown>("/api/admin/agencies", backendParams);
+    return normalisePaginated(raw, normaliseAgency as (item: Record<string, unknown>) => AgencyRecord);
+  },
+
+  get: async (id: string): Promise<AgencyRecord> => {
+    const raw = await api.get<unknown>(`/api/admin/agencies/${id}`);
+    const envelope = raw as { success?: boolean; data?: Record<string, unknown> };
+    const data = envelope?.data ?? (raw as Record<string, unknown>);
+    return normaliseAgency(data as Record<string, unknown>);
+  },
 
   create: (data: {
     name: string; ownerName: string; phone: string;
@@ -383,31 +635,102 @@ export const agenciesApi = {
 // ──────────────────────────────────────
 //  PAYMENTS
 // ──────────────────────────────────────
+
+/**
+ * Backend GET /api/admin/payments returns:
+ *   { id, userId, type, amountEGP, currency, status, createdAt,
+ *     user: { id, username, email } }
+ *
+ * Backend GET /api/admin/payments/stats returns:
+ *   { success, data: { grandTotal, totalTransactions, byStatus, byType } }
+ *   where byType is an array of { type, _count: { id } } objects, NOT a plain Record.
+ */
 export type PaymentRecord = {
-  id: string;
-  type: string;
-  amount: number;
-  currency: string;
-  status: "SUCCESS" | "PENDING" | "FAILED" | "REFUNDED";
-  description?: string;
-  createdAt: string;
-  userId: string;
-  user: { id: string; displayName: string; username: string };
+  id:          string;
+  type:        string;
+  amount:      number;     // normalised from amountEGP
+  amountEGP?:  number;     // raw backend field
+  currency:    string;
+  status:      "SUCCESS" | "PENDING" | "FAILED" | "REFUNDED";
+  description?:string;
+  createdAt:   string;
+  userId:      string;
+  user:        { id: string; displayName: string; username: string };
 };
 
 export type PaymentStats = {
-  grandTotal: number;
-  byType: Record<string, number>;
-  byStatus: Record<string, number>;
-  recentCount: number;
+  grandTotal:        number;
+  totalTransactions: number;
+  byType:            Record<string, number>;
+  byStatus:          Record<string, number>;
+  recentCount:       number;
 };
 
-export const paymentsApi = {
-  list: (params?: { type?: string; status?: string; page?: number; pageSize?: number }) =>
-    api.get<PaginatedResponse<PaymentRecord>>("/api/admin/payments", params),
+function normalisePayment(raw: Record<string, unknown>): PaymentRecord {
+  const user = (raw.user ?? {}) as Record<string, unknown>;
+  return {
+    id:          String(raw.id          ?? ""),
+    type:        String(raw.type        ?? ""),
+    amount:      Number(raw.amountEGP   ?? raw.amount ?? 0),
+    amountEGP:   Number(raw.amountEGP   ?? 0),
+    currency:    String(raw.currency    ?? "EGP"),
+    status:      (raw.status ?? "PENDING") as PaymentRecord["status"],
+    description: raw.description as string | undefined,
+    createdAt:   String(raw.createdAt   ?? ""),
+    userId:      String(raw.userId      ?? ""),
+    user: {
+      id:          String(user.id       ?? ""),
+      username:    String(user.username  ?? ""),
+      displayName: String(user.displayName ?? user.username ?? user.email ?? "—"),
+    },
+  };
+}
 
-  stats: () =>
-    api.get<PaymentStats>("/api/admin/payments/stats"),
+function normalisePaymentStats(raw: unknown): PaymentStats {
+  const envelope = raw as { success?: boolean; data?: Record<string, unknown> };
+  const d = (envelope?.data ?? envelope) as Record<string, unknown>;
+
+  // byType from backend is an array: [{ type: "COIN_PURCHASE", _count: { id: 5 } }]
+  // normalise to Record<string, number>
+  const byTypeRaw = d?.byType;
+  const byType: Record<string, number> = {};
+  if (Array.isArray(byTypeRaw)) {
+    for (const item of byTypeRaw as Array<{ type: string; _count: { id: number } }>) {
+      if (item.type) byType[item.type] = item._count?.id ?? 0;
+    }
+  } else if (byTypeRaw && typeof byTypeRaw === "object") {
+    Object.assign(byType, byTypeRaw);
+  }
+
+  const byStatusRaw = d?.byStatus;
+  const byStatus: Record<string, number> = {};
+  if (Array.isArray(byStatusRaw)) {
+    for (const item of byStatusRaw as Array<{ status: string; _count: { id: number } }>) {
+      if (item.status) byStatus[item.status] = item._count?.id ?? 0;
+    }
+  } else if (byStatusRaw && typeof byStatusRaw === "object") {
+    Object.assign(byStatus, byStatusRaw);
+  }
+
+  return {
+    grandTotal:        Number(d?.grandTotal        ?? 0),
+    totalTransactions: Number(d?.totalTransactions ?? 0),
+    byType,
+    byStatus,
+    recentCount:       Number(d?.recentCount       ?? 0),
+  };
+}
+
+export const paymentsApi = {
+  list: async (params?: { type?: string; status?: string; page?: number; pageSize?: number }): Promise<PaginatedResponse<PaymentRecord>> => {
+    const raw = await api.get<unknown>("/api/admin/payments", params);
+    return normalisePaginated(raw, normalisePayment as (item: Record<string, unknown>) => PaymentRecord);
+  },
+
+  stats: async (): Promise<PaymentStats> => {
+    const raw = await api.get<unknown>("/api/admin/payments/stats");
+    return normalisePaymentStats(raw);
+  },
 
   refund: (id: string, reason?: string) =>
     api.patch<PaymentRecord>(`/api/admin/payments/${id}/refund`, { reason }),
@@ -430,9 +753,43 @@ export type MomentRecord = {
   user: { id: string; displayName: string; username: string; avatarUrl?: string };
 };
 
+/**
+ * Backend returns:
+ *   { id, content, mediaUrls (array), visibility ('PUBLIC'|'PRIVATE'),
+ *     viewsCount, createdAt, userId, user, likesCount, commentsCount, reportsCount,
+ *     status (already normalised by admin.core.routes) }
+ */
+function normaliseMoment(raw: Record<string, unknown>): MomentRecord {
+  const user = (raw.user ?? {}) as Record<string, unknown>;
+  // mediaUrls is an array — take first entry as mediaUrl
+  const mediaUrls = Array.isArray(raw.mediaUrls) ? (raw.mediaUrls as string[]) : [];
+  const firstMedia = (raw.mediaUrl as string | undefined) ?? mediaUrls[0];
+  return {
+    id:            String(raw.id        ?? ""),
+    content:       raw.content as string | undefined,
+    mediaUrl:      firstMedia,
+    mediaType:     firstMedia?.match(/\.(mp4|mov|avi|webm)$/i) ? "VIDEO" : firstMedia ? "IMAGE" : undefined,
+    // backend admin.core.routes already sets status field to HIDDEN/ACTIVE based on visibility
+    status:        (raw.status ?? (raw.visibility === "PRIVATE" ? "HIDDEN" : "ACTIVE")) as MomentRecord["status"],
+    likesCount:    Number(raw.likesCount    ?? 0),
+    commentsCount: Number(raw.commentsCount ?? 0),
+    reportsCount:  Number(raw.reportsCount  ?? 0),
+    createdAt:     String(raw.createdAt ?? ""),
+    userId:        String(raw.userId    ?? ""),
+    user: {
+      id:          String(user.id          ?? ""),
+      username:    String(user.username    ?? ""),
+      displayName: String(user.displayName ?? user.username ?? ""),
+      avatarUrl:   (user.avatarUrl ?? user.avatar) as string | undefined,
+    },
+  };
+}
+
 export const momentsApi = {
-  list: (params?: { status?: string; q?: string; page?: number; pageSize?: number }) =>
-    api.get<PaginatedResponse<MomentRecord>>("/api/admin/moments", params),
+  list: async (params?: { status?: string; q?: string; page?: number; pageSize?: number }): Promise<PaginatedResponse<MomentRecord>> => {
+    const raw = await api.get<unknown>("/api/admin/moments", params);
+    return normalisePaginated(raw, normaliseMoment as (item: Record<string, unknown>) => MomentRecord);
+  },
 
   hide: (id: string, reason?: string) =>
     api.patch<MomentRecord>(`/api/admin/moments/${id}/hide`, { reason }),
@@ -440,7 +797,7 @@ export const momentsApi = {
   restore: (id: string) =>
     api.patch<MomentRecord>(`/api/admin/moments/${id}/restore`),
 
-  delete: (id: string, reason?: string) =>
+  delete: (id: string, _reason?: string) =>
     api.delete<void>(`/api/admin/moments/${id}`),
 };
 
@@ -458,15 +815,45 @@ export type VipConfig = {
   enabled: boolean;
 };
 
+/**
+ * Backend GET /api/admin/vip/users returns UserVip records:
+ *   { id, userId, tier, startedAt, expiresAt, status, autoRenew, ..., User: { id, username, displayName, avatar } }
+ *
+ * We normalise these into the standard UserRecord shape expected by the VIP page.
+ */
+function normaliseVipUser(raw: Record<string, unknown>): UserRecord {
+  // The nested user object has capital U in the backend response
+  const u = (raw.User ?? raw.user ?? {}) as Record<string, unknown>;
+  return {
+    id:          String(u.id          ?? raw.userId ?? ""),
+    username:    String(u.username    ?? ""),
+    displayName: String(u.displayName ?? u.username ?? ""),
+    avatarUrl:   (u.avatarUrl ?? u.avatar) as string | undefined,
+    coins:       Number(u.coins       ?? 0),
+    vipLevel:    vipTierToLevel(raw.tier as string),
+    vipTier:     raw.tier as string | undefined,
+    isAgent:     false,
+    isHost:      false,
+    status:      raw.status === "ACTIVE" ? "ACTIVE" : "ACTIVE",
+    createdAt:   String(u.createdAt   ?? ""),
+  };
+}
+
 export const vipApi = {
-  listConfigs: () =>
-    api.get<VipConfig[]>("/api/admin/vip/configs"),
+  listConfigs: async (): Promise<VipConfig[]> => {
+    const raw = await api.get<unknown>("/api/admin/vip/configs");
+    const envelope = raw as { success?: boolean; data?: unknown[] };
+    const items = Array.isArray(envelope?.data) ? envelope.data : Array.isArray(raw) ? raw as unknown[] : [];
+    return items as VipConfig[];
+  },
 
   updateConfig: (level: number, data: Partial<VipConfig>) =>
     api.patch<VipConfig>(`/api/admin/vip/configs/${level}`, data),
 
-  listVipUsers: (params?: { level?: number; page?: number }) =>
-    api.get<PaginatedResponse<UserRecord>>("/api/admin/vip/users", params),
+  listVipUsers: async (params?: { level?: number; page?: number }): Promise<PaginatedResponse<UserRecord>> => {
+    const raw = await api.get<unknown>("/api/admin/vip/users", params);
+    return normalisePaginated(raw, normaliseVipUser as (item: Record<string, unknown>) => UserRecord);
+  },
 
   grant: (userId: string, level: number, durationDays?: number) =>
     api.post<void>("/api/admin/vip/grant", { userId, level, durationDays }),
@@ -527,8 +914,11 @@ export type BannerRecord = {
 };
 
 export const bannersApi = {
-  list: () =>
-    api.get<BannerRecord[]>("/api/admin/banners"),
+  list: async (): Promise<BannerRecord[]> => {
+    const raw = await api.get<unknown>("/api/admin/banners");
+    const envelope = raw as { success?: boolean; data?: BannerRecord[] };
+    return Array.isArray(envelope?.data) ? envelope.data : Array.isArray(raw) ? raw as BannerRecord[] : [];
+  },
 
   create: (data: Omit<BannerRecord, "id" | "createdAt">) =>
     api.post<BannerRecord>("/api/admin/banners", data),
@@ -599,8 +989,11 @@ export type StoreItemRecord = {
 };
 
 export const storeApi = {
-  list: (params?: { type?: string; enabled?: boolean }) =>
-    api.get<StoreItemRecord[]>("/api/admin/store/items", params),
+  list: async (params?: { type?: string; enabled?: boolean }): Promise<StoreItemRecord[]> => {
+    const raw = await api.get<unknown>("/api/admin/store/items", params as Record<string, string | number | boolean | undefined | null>);
+    const envelope = raw as { success?: boolean; data?: StoreItemRecord[] };
+    return Array.isArray(envelope?.data) ? envelope.data : Array.isArray(raw) ? raw as StoreItemRecord[] : [];
+  },
 
   create: (data: Omit<StoreItemRecord, "id" | "createdAt">) =>
     api.post<StoreItemRecord>("/api/admin/store/items", data),
@@ -639,12 +1032,41 @@ export type WalletTransaction = {
   createdAt: string;
 };
 
-export const walletApi = {
-  list: (params?: { q?: string; page?: number }) =>
-    api.get<PaginatedResponse<WalletRecord>>("/api/admin/wallet", params),
+/**
+ * Backend UserWallet fields:
+ *   id, userId, coinBalance, totalEarned, totalSpent, updatedAt,
+ *   user: { id, username, displayName }
+ *
+ * Dashboard expects:
+ *   userId, user, coins, diamonds, totalEarned, totalSpent, lastTransactionAt
+ */
+function normaliseWallet(raw: Record<string, unknown>): WalletRecord {
+  const user = (raw.user ?? {}) as Record<string, unknown>;
+  return {
+    userId:            String(raw.userId            ?? raw.id ?? ""),
+    coins:             Number(raw.coins             ?? raw.coinBalance ?? 0),
+    diamonds:          Number(raw.diamonds          ?? 0),
+    totalEarned:       Number(raw.totalEarned       ?? 0),
+    totalSpent:        Number(raw.totalSpent        ?? 0),
+    lastTransactionAt: (raw.lastTransactionAt ?? raw.updatedAt) as string | undefined,
+    user: {
+      username:    String(user.username    ?? ""),
+      displayName: String(user.displayName ?? user.username ?? ""),
+    },
+  };
+}
 
-  getUserWallet: (userId: string) =>
-    api.get<WalletRecord>(`/api/admin/wallet/${userId}`),
+export const walletApi = {
+  list: async (params?: { q?: string; page?: number }): Promise<PaginatedResponse<WalletRecord>> => {
+    const raw = await api.get<unknown>("/api/admin/wallet", params);
+    return normalisePaginated(raw, normaliseWallet as (item: Record<string, unknown>) => WalletRecord);
+  },
+
+  getUserWallet: async (userId: string): Promise<WalletRecord> => {
+    const raw = await api.get<unknown>(`/api/admin/wallet/${userId}`);
+    const envelope = raw as { success?: boolean; data?: Record<string, unknown> };
+    return normaliseWallet((envelope?.data ?? raw) as Record<string, unknown>);
+  },
 
   transactions: (userId: string, params?: { page?: number }) =>
     api.get<PaginatedResponse<WalletTransaction>>(
@@ -661,25 +1083,115 @@ export const walletApi = {
 export type GiftRecord = {
   id: string;
   name: string;
+  nameAr?: string;
   iconKey?: string;
   imageUrl?: string;
+  thumbnailUrl?: string;
   coinValue: number;
+  coinPrice?: number;
   animationUrl?: string;
+  animationType?: "lottie" | "rive" | "webp" | "gif" | "png" | "svg" | "svga" | string;
+  durationMs?: number;
+  scale?: number;
   category: string;
   enabled: boolean;
+  isActive?: boolean;
+  isVipOnly?: boolean;
+  isLegendary?: boolean;
+  comboCount?: number;
+  minTier?: string | null;
   sortOrder: number;
   createdAt: string;
 };
 
-export const giftsApi = {
-  list: (params?: { category?: string; enabled?: boolean }) =>
-    api.get<GiftRecord[]>("/api/admin/gifts", params),
+/**
+ * Backend Gift fields:
+ *   id, name, nameAr, animationUrl, thumbnailUrl, coinPrice,
+ *   category, isActive, isVipOnly, isLegendary, comboCount, minTier, createdAt
+ *
+ * Dashboard expects:
+ *   id, name, iconKey, imageUrl, coinValue, animationUrl, category, enabled, sortOrder, createdAt
+ */
+function normaliseGift(raw: Record<string, unknown>): GiftRecord {
+  const animUrl = (raw.animationUrl ?? "") as string;
+  let inferredType = "lottie";
+  if (animUrl.endsWith(".riv")) inferredType = "rive";
+  else if (animUrl.endsWith(".gif")) inferredType = "gif";
+  else if (animUrl.endsWith(".webp")) inferredType = "webp";
+  else if (animUrl.endsWith(".png") || animUrl.endsWith(".jpg") || animUrl.endsWith(".jpeg")) inferredType = "png";
+  else if (animUrl.endsWith(".svg")) inferredType = "svg";
 
-  create: (data: Omit<GiftRecord, "id" | "createdAt">) =>
-    api.post<GiftRecord>("/api/admin/gifts", data),
+  return {
+    id:            String(raw.id            ?? ""),
+    name:          String(raw.name          ?? raw.nameAr ?? ""),
+    nameAr:        raw.nameAr ? String(raw.nameAr) : undefined,
+    iconKey:       raw.iconKey as string | undefined,
+    imageUrl:      (raw.imageUrl ?? raw.thumbnailUrl) as string | undefined,
+    thumbnailUrl:  (raw.thumbnailUrl ?? raw.imageUrl) as string | undefined,
+    coinValue:     Number(raw.coinValue     ?? raw.coinPrice ?? 0),
+    coinPrice:     Number(raw.coinPrice     ?? raw.coinValue ?? 0),
+    animationUrl:  animUrl || undefined,
+    animationType: (raw.animationType as string) || inferredType,
+    durationMs:    raw.durationMs !== undefined ? Number(raw.durationMs) : 3000,
+    scale:         raw.scale !== undefined ? Number(raw.scale) : 1.0,
+    category:      String(raw.category     ?? "regular"),
+    enabled:       raw.enabled !== undefined ? Boolean(raw.enabled) : Boolean(raw.isActive ?? true),
+    isActive:      raw.isActive !== undefined ? Boolean(raw.isActive) : Boolean(raw.enabled ?? true),
+    isVipOnly:     Boolean(raw.isVipOnly),
+    isLegendary:   Boolean(raw.isLegendary),
+    comboCount:    Number(raw.comboCount    ?? 3),
+    minTier:       (raw.minTier as string) || null,
+    sortOrder:     Number(raw.sortOrder     ?? 0),
+    createdAt:     String(raw.createdAt    ?? ""),
+  };
+}
+
+export const giftsApi = {
+  list: async (params?: { category?: string; enabled?: boolean; q?: string }): Promise<GiftRecord[]> => {
+    const raw = await api.get<unknown>("/api/admin/gifts", params as Record<string, string | number | boolean | undefined | null>);
+    const envelope = raw as { success?: boolean; data?: unknown[] };
+    const items = Array.isArray(envelope?.data) ? envelope.data : Array.isArray(raw) ? raw as unknown[] : [];
+    return items.map(item => normaliseGift(item as Record<string, unknown>));
+  },
+
+  get: async (id: string): Promise<GiftRecord | null> => {
+    const raw = await api.get<unknown>(`/api/admin/gifts/${id}`).catch(() => null);
+    const envelope = raw as { success?: boolean; data?: unknown };
+    const item = envelope?.data ?? raw;
+    if (!item) return null;
+    return normaliseGift(item as Record<string, unknown>);
+  },
+
+  create: (data: Partial<GiftRecord>) =>
+    api.post<GiftRecord>("/api/admin/gifts", {
+      name:         data.name,
+      nameAr:       data.nameAr || data.name,
+      animationUrl: data.animationUrl ?? "",
+      thumbnailUrl: (data.imageUrl || data.thumbnailUrl) ?? "",
+      coinPrice:    (data.coinValue ?? data.coinPrice) ?? 0,
+      category:     data.category ?? "regular",
+      isActive:     data.enabled !== undefined ? data.enabled : (data.isActive !== undefined ? data.isActive : true),
+      isVipOnly:    Boolean(data.isVipOnly),
+      isLegendary:  Boolean(data.isLegendary),
+      comboCount:   data.comboCount ?? 3,
+      minTier:      data.minTier ?? null,
+    }),
 
   update: (id: string, data: Partial<GiftRecord>) =>
-    api.patch<GiftRecord>(`/api/admin/gifts/${id}`, data),
+    api.patch<GiftRecord>(`/api/admin/gifts/${id}`, {
+      ...(data.name         !== undefined && { name: data.name }),
+      ...(data.nameAr       !== undefined && { nameAr: data.nameAr }),
+      ...(data.animationUrl !== undefined && { animationUrl: data.animationUrl }),
+      ...((data.imageUrl !== undefined || data.thumbnailUrl !== undefined) && { thumbnailUrl: data.imageUrl ?? data.thumbnailUrl }),
+      ...((data.coinValue !== undefined || data.coinPrice !== undefined) && { coinPrice: data.coinValue ?? data.coinPrice }),
+      ...(data.category     !== undefined && { category: data.category }),
+      ...(data.enabled      !== undefined && { isActive: data.enabled }),
+      ...(data.isActive     !== undefined && { isActive: data.isActive }),
+      ...(data.isVipOnly    !== undefined && { isVipOnly: data.isVipOnly }),
+      ...(data.isLegendary  !== undefined && { isLegendary: data.isLegendary }),
+      ...(data.comboCount   !== undefined && { comboCount: data.comboCount }),
+      ...(data.minTier      !== undefined && { minTier: data.minTier }),
+    }),
 
   delete: (id: string) =>
     api.delete<void>(`/api/admin/gifts/${id}`),
@@ -706,8 +1218,12 @@ export type AppSettings = {
 };
 
 export const settingsApi = {
-  get: () =>
-    api.get<AppSettings>("/api/admin/settings"),
+  get: async (): Promise<AppSettings> => {
+    const raw = await api.get<unknown>("/api/admin/settings");
+    // Backend returns { success: true, data: { key: "value", ... } }
+    const envelope = raw as { success?: boolean; data?: Record<string, unknown> };
+    return (envelope?.data ?? raw) as AppSettings;
+  },
 
   update: (data: Partial<AppSettings>) =>
     api.patch<AppSettings>("/api/admin/settings", data),
@@ -794,25 +1310,104 @@ export const assetsApi = {
 // ──────────────────────────────────────
 //  DASHBOARD STATS
 // ──────────────────────────────────────
-export type DashboardStats = {
-  totalUsers: number;
-  activeUsers: number;
-  bannedUsers: number;
-  totalRooms: number;
-  activeRooms: number;
-  activeAgencies: number;
-  pendingAgencies: number;
-  totalRevenue: number;
-  revenueByType: Record<string, number>;
-  openReports: number;
-  recentPayments: PaymentRecord[];
-  recentAgencies: AgencyRecord[];
-  recentUsers: UserRecord[];
+
+/**
+ * Shape of the data object returned by GET /api/admin/stats/dashboard.
+ *
+ * The backend wraps every response in { success: true, data: { ... } }.
+ * statsApi.dashboard() unwraps that envelope and returns this type directly.
+ *
+ * Verified against admin.core.routes.js GET /stats/dashboard:
+ *   totalUsers, activeUsers, bannedUsers, totalRooms, activeRooms,
+ *   activeAgencies, pendingAgencies, totalRevenue, openReports, recentPayments
+ *
+ * recentAgencies and recentUsers are NOT returned by the backend — they
+ * default to [] so the dashboard renders gracefully without crashing.
+ */
+export type RecentPayment = {
+  id:        string;
+  type:      string;
+  amountEGP: number;
+  status:    string;
+  createdAt: string;
+  user: {
+    id:          string;
+    username:    string;
+    displayName: string | null;
+  };
 };
 
+export type DashboardStats = {
+  totalUsers:       number;
+  activeUsers:      number;
+  bannedUsers:      number;
+  totalRooms:       number;
+  activeRooms:      number;
+  activeAgencies:   number;
+  pendingAgencies:  number;
+  totalRevenue:     number;
+  openReports:      number;
+  recentPayments:   RecentPayment[];
+  // Fields not yet returned by backend — default to [] in the normaliser
+  recentAgencies:   AgencyRecord[];
+  recentUsers:      UserRecord[];
+  revenueByType:    Record<string, number>;
+};
+
+/** Envelope shape every Express route uses: { success: boolean; data: T } */
+type ExpressEnvelope<T> = { success: boolean; data: T };
+
+function normaliseDashboardStats(raw: unknown): DashboardStats {
+  // raw is { success, data: { totalUsers, ... } }
+  const envelope = raw as ExpressEnvelope<Partial<DashboardStats>>;
+  const d = (envelope?.data ?? envelope) as Partial<DashboardStats> & {
+    recentPayments?: Array<{
+      id: string; type: string; amountEGP: number; status: string; createdAt: string;
+      user?: { id?: string; username?: string; displayName?: string | null };
+    }>;
+  };
+
+  // Normalise recentPayments — backend returns user without displayName
+  const recentPayments: RecentPayment[] = Array.isArray(d.recentPayments)
+    ? d.recentPayments.map(p => ({
+        id:        String(p.id        ?? ""),
+        type:      String(p.type      ?? ""),
+        amountEGP: Number(p.amountEGP ?? 0),
+        status:    String(p.status    ?? ""),
+        createdAt: String(p.createdAt ?? ""),
+        user: {
+          id:          String(p.user?.id       ?? ""),
+          username:    String(p.user?.username  ?? ""),
+          displayName: p.user?.displayName ?? p.user?.username ?? null,
+        },
+      }))
+    : [];
+
+  return {
+    totalUsers:      Number(d.totalUsers      ?? 0),
+    activeUsers:     Number(d.activeUsers     ?? 0),
+    bannedUsers:     Number(d.bannedUsers     ?? 0),
+    totalRooms:      Number(d.totalRooms      ?? 0),
+    activeRooms:     Number(d.activeRooms     ?? 0),
+    activeAgencies:  Number(d.activeAgencies  ?? 0),
+    pendingAgencies: Number(d.pendingAgencies ?? 0),
+    totalRevenue:    Number(d.totalRevenue    ?? 0),
+    openReports:     Number(d.openReports     ?? 0),
+    recentPayments,
+    recentAgencies:  Array.isArray(d.recentAgencies)  ? d.recentAgencies  : [],
+    recentUsers:     Array.isArray(d.recentUsers)     ? d.recentUsers     : [],
+    revenueByType:   (d.revenueByType && typeof d.revenueByType === "object")
+                       ? d.revenueByType
+                       : {},
+  };
+}
+
 export const statsApi = {
-  dashboard: () =>
-    api.get<DashboardStats>("/api/admin/stats/dashboard"),
+  dashboard: async (): Promise<DashboardStats> => {
+    // fetchExpress returns the raw JSON body — we unwrap + normalise here
+    const raw = await api.get<unknown>("/api/admin/stats/dashboard");
+    return normaliseDashboardStats(raw);
+  },
 
   revenue: (period: "day" | "week" | "month" | "year") =>
     api.get<{ labels: string[]; values: number[] }>("/api/admin/stats/revenue", { period }),

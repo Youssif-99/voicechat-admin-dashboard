@@ -10,18 +10,18 @@
       "page": "/",
       "matchers": [
         {
-          "regexp": "^(?:\\/(_next\\/data\\/[^/]{1,}))?(?:\\/((?!api|_next\\/static|_next\\/image|favicon.ico).*))(.json)?[\\/#\\?]?$",
-          "originalSource": "/((?!api|_next/static|_next/image|favicon.ico).*)"
+          "regexp": "^(?:\\/(_next\\/data\\/[^/]{1,}))?(?:\\/((?!_next\\/static|_next\\/image|favicon.ico|health|icons\\/.*\\.|api\\/icons|api\\/assets|api\\/auth|api\\/users|api\\/rooms|api\\/banners|api\\/gifts|api\\/coins|api\\/wallet|api\\/rankings|api\\/vip|api\\/shop|api\\/rewards|api\\/notifications|api\\/follow|api\\/posts|api\\/loyalty|api\\/chat|api\\/settings|api\\/agents|api\\/hosts|api\\/agent|api\\/payment|api\\/moderation|api\\/recordings|api\\/agency-types|api\\/financial|api\\/hierarchy|api\\/recharge).*))(.json)?[\\/#\\?]?$",
+          "originalSource": "/((?!_next/static|_next/image|favicon.ico|health|icons/.*\\.|api/icons|api/assets|api/auth|api/users|api/rooms|api/banners|api/gifts|api/coins|api/wallet|api/rankings|api/vip|api/shop|api/rewards|api/notifications|api/follow|api/posts|api/loyalty|api/chat|api/settings|api/agents|api/hosts|api/agent|api/payment|api/moderation|api/recordings|api/agency-types|api/financial|api/hierarchy|api/recharge).*)"
         }
       ],
       "wasm": [],
       "assets": [],
       "env": {
-        "__NEXT_BUILD_ID": "wwR8deQUqZkj_JTTDu7Vo",
-        "NEXT_SERVER_ACTIONS_ENCRYPTION_KEY": "avoft3m/W512UPU6UeAF5a9dbkJilbsCqvaXoAGjodA=",
-        "__NEXT_PREVIEW_MODE_ID": "6c89b4c32131cddd8773087f75cc43be",
-        "__NEXT_PREVIEW_MODE_ENCRYPTION_KEY": "5ec6024e8c908eccdcad2eaf1c55c03e1386f8bd4baa9edd7e0d24ad1abb25ec",
-        "__NEXT_PREVIEW_MODE_SIGNING_KEY": "5dc3574063077247de42de140f7946c7db5b90dd66bd964d3abaa12fd768d211"
+        "__NEXT_BUILD_ID": "5B4GrwU6IH5iwN4muqb9p",
+        "NEXT_SERVER_ACTIONS_ENCRYPTION_KEY": "RMGk3HN064hRAuhpyfSnY3LW1pJYUGK6HNEN6nyZrCM=",
+        "__NEXT_PREVIEW_MODE_ID": "f57a458d918c9237f43ece7f7eb687fa",
+        "__NEXT_PREVIEW_MODE_ENCRYPTION_KEY": "e7aaeb96a402583dabfbbb63f484cb69d8c8e88916c92797dd720b646f93dbb1",
+        "__NEXT_PREVIEW_MODE_SIGNING_KEY": "34cd4fddbc7a75116d96eae3502ddd113d6fd4776e30655ad98bb6cbf393c907"
       }
     }
   },
